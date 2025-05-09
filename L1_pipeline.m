@@ -168,10 +168,11 @@ end
 %%
 % Define the filename for storing the plot data
 jsonFilename = 'lidar_plot_data.json';
+load('stackpos.mat');
 plotIdx = 1:numel(L1); dt = 1;
 
 if numel(L1) > 120
-    plotIdx = find([L1.Dates] >= [L1(end-120).Dates]);
+    plotIdx = find([L1.Dates] >= [L1(end-72).Dates]);
     dt = 6;
 
 end
@@ -194,29 +195,35 @@ for j = 1:dt:numel(plotIdx)
     z1d = Z3D(5, x1d <= 50);  % Profile at fixed y-index
     x1d_crop = x1d(x1d <= 50);
 
-%     plot(x1d_crop, movmean(z1d,5), '-', 'Color', colors(j,:), 'LineWidth', round(numel(plotIdx)/(numel(plotIdx) - j/1.3)), 'DisplayName', datestr(L1(i).Dates)); hold on
-%     plot(x1d_crop, movmean(z1d,5), '-', 'Color', colors(j,:), 'LineWidth', round((j + numel(L1)+1)/numel(L1)), 'DisplayName', datestr(L1(i).Dates)); hold on
+    plot(x1d_crop, movmean(z1d,5), '-', 'Color', colors(j,:), 'LineWidth', round(numel(plotIdx)/(numel(plotIdx) - j/1.3)), 'DisplayName', datestr(L1(i).Dates)); hold on
+    plot(x1d_crop, movmean(z1d,5), '-', 'Color', colors(j,:), 'LineWidth', round((j + numel(L1)+1)/numel(L1)), 'DisplayName', datestr(L1(i).Dates)); hold on
 % % end
     % Save to structure for JSON
     plotData(j).dates = datestr(L1(i).Dates);
     plotData(j).x = x1d_crop;
     plotData(j).z = z1d;
     plotData(j).color = colors(j,:);
+    % for i = 1:5
+        scatter([stackplotData.x], [stackplotData.z], 100, 'r^', 'filled','HandleVisibility', 'off');
+    % end
 end
 
-% % Optional: add MHHW, MHW, MSL lines
-% MHHW = 1.566; MSL = 0.774; MHW = 1.344;
-% plot([0 50], [MHHW MHHW], 'k--', 'handlevisibility', 'off'); text(5, MHHW+0.05, 'MHHW')
-% plot([0 50], [MHW MHW], 'k--', 'handlevisibility', 'off'); text(5, MHW+0.05, 'MHW')
-% plot([0 50], [MSL MSL], 'k--', 'handlevisibility', 'off'); text(5, MSL+0.05, 'MSL')
 
-% grid on; legend show
-% title(['Recent 1D Profiles on' datestr(L1(end).Dates)] );
-% xlabel('Cross-shore Distance (m)');
-% ylabel('Elevation (NAVD88)');
-% ylim([0.5 3.5]); xlim([0 50]);
-% set(gcf, 'color', 'w')
-% ax1=gca; ax1.FontSize=14;
+plotData.stackx = [stackplotData.x];
+plotData.stackz = [stackplotData.z];
+% Optional: add MHHW, MHW, MSL lines
+MHHW = 1.566; MSL = 0.774; MHW = 1.344;
+plot([0 50], [MHHW MHHW], 'k--', 'handlevisibility', 'off'); text(5, MHHW+0.05, 'MHHW')
+plot([0 50], [MHW MHW], 'k--', 'handlevisibility', 'off'); text(5, MHW+0.05, 'MHW')
+plot([0 50], [MSL MSL], 'k--', 'handlevisibility', 'off'); text(5, MSL+0.05, 'MSL')
+
+grid on; legend show
+title(['Recent 1D Profiles on' datestr(L1(end).Dates)] );
+xlabel('Cross-shore Distance (m)');
+ylabel('Elevation (NAVD88)');
+ylim([0.5 3.5]); xlim([0 50]);
+set(gcf, 'color', 'w')
+ax1=gca; ax1.FontSize=14;
 % --- STEP 5: Save the data to JSON file ---
 fid = fopen(jsonFilename, 'w');
 fprintf(fid, '%s', jsonencode(plotData));

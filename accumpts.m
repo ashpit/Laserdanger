@@ -40,7 +40,7 @@ filterStats = @(v) struct( ...
     );
 stats = cellfun(filterStats, zs, 'UniformOutput', false);
 means = cellfun(@(s) s.mean, stats);
-mins = cellfun(@(s) s.mean, stats);
+mins = cellfun(@(s) s.min, stats);
 modes = cellfun(@(s) s.mode, stats);
 stds  = cellfun(@(s) s.std, stats);
 counts = cellfun(@(s) s.count, stats);
@@ -60,7 +60,6 @@ means(invalid_idx) = NaN;
 modes(invalid_idx) = NaN;
 stds(invalid_idx) = NaN;
 modes(invalid_idx) = NaN;
-percentile(invalid_idx)=NaN;
 
 ii=isnan(counts(:)) == 0; % 1d indices of valid data
 [i,j]=find(isnan(counts) == 0); % 2d indices of valid data
