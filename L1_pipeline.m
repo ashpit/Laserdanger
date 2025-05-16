@@ -72,21 +72,21 @@ tmatrix = config.transformMatrix;
 bounds = config.LidarBoundary;
 %% Load existing LO structure if available
 if isfile(outputPath)
-    L1 = load(outputPath);
+    load(outputPath); % loads struct labeled (L1)
     % varNames = fieldnames(S);
     % L0_varname = varNames{contains(varNames, 'L0')};
     % L0 = S.(L0_varname);
-    
+
     % Start from next hour after last timestamp
     N = numel(L1);
-    Start = dateshift(L1(end).Dates + hours(1), 'start','hour');
+    Start = L1(end).Dates; 
 else
     % No existing DO — start fresh
-    L1 = struct('Dates', {}, 'X', {}, 'Y', {}, 'Zmean', {}, 'Zmin', {},...
-                'Zstdv', {}, 'Zmode', {}, 'SNR', {});
+    L1 = struct('Dates', {}, 'X', {}, 'Y', {}, 'Zmean', {},'Zmax', {}, ...
+                'Zmin', {}, 'Zstdv', {}, 'Zmode', {});
     N = 0;
     % Default earliest start time (first of April as fallback)
-    Start = datetime(2025, 05, 01);
+    Start = datetime(2025, 05, 01); Start.TimeZone = 'UTC';
 end
 
 % get the files
@@ -101,14 +101,15 @@ epochStrings = erase(epochStrings, '.laz');     % remove extension
 epochNumbers = str2double(epochStrings);
 
 % Convert to datetime
-fileDates = datetime(epochNumbers, 'ConvertFrom', 'posixtime');
+fileDates = datetime(epochNumbers, 'ConvertFrom', 'posixtime', 'TimeZone','UTC');
 validDates = fileDates(fileDates > Start);
 validFiles = fileNames(fileDates > Start);
 % Example: get nearest hour for last file
 End = dateshift(fileDates(end), 'start', 'hour', 'nearest');
 num_to_process = numel(validDates);
 %% Enter the loop 
-
+%if numel(validFiles) >= 1
+    % start the loop
 for n = 1:num_to_process
     currentFile = fullfile(dataFolder, validFiles{n});
     Xtime = validDates(n);
@@ -119,7 +120,7 @@ for n = 1:num_to_process
     numPoints = ptCloud.Count;
     points = ptCloud.Location;
     homogeneousPoints = [points, ones(numPoints, 1)];        
-% Apply the Transformation
+%% Apply the Transformation
     transformedPoints = (tmatrix * homogeneousPoints')';
     xyz = transformedPoints(:, 1:3);
     Ii = ptCloud.Intensity;
@@ -140,45 +141,59 @@ for n = 1:num_to_process
     points = xyz(selectinds,:);
     X = points(:,1); Y = points(:,2); Z = points(:,3);
 % Rasterize pointcloud using accumarray script 
-    binsize = 0.25; % in meters
-    [Xutm, Yutm, Zmean, Zmin, Zstd, Zmode] = accumpts(points, binsize);
-% Filter residual noise using svd triangle planar fitting 
+    binsize = 0.10; % in meters
+    [Xutm, Yutm, Zmean, Zmax, Zmin, Zstd, Zmode] = accumpts(points, binsize);
+%% Filter residual noise using svd triangle planar fitting 
     points3 = [Xutm, Yutm, Zmode];
-    windowSize = 3; thresh = 0.2;
+    windowSize = 10; thresh = 0.2;
+    [groundPoints, ~] = ResidualKernelFilter(points3, windowSize, thresh);
+    Xutmc = Xutm(groundPoints);
+    Yutmc = Yutm(groundPoints);
+    Zmeanc = Zmean(groundPoints);
+    Zmaxc = Zmax(groundPoints);
+    Zminc = Zmin(groundPoints);
+    Zmodec = Zmode(groundPoints);
+    Zstdc = Zstd(groundPoints);
+% Filter again with smaller triangles
+    points3 = [Xutmc, Yutmc, Zmodec];
+    windowSize = 3; thresh = 0.1;
     [groundPoints, Z_interp] = ResidualKernelFilter(points3, windowSize, thresh);
-    X_clean = Xutm(groundPoints);
-    Y_clean = Yutm(groundPoints);
-    Zmean_clean = Zmean(groundPoints);
-    Zmode_clean = Zmode(groundPoints);
-    Zmin_clean = Zmin(groundPoints);
-    Zstd_clean = Zstd(groundPoints);
-% save struct
+    X_clean = Xutmc(groundPoints);
+    Y_clean = Yutmc(groundPoints);
+    Zmean_clean = Zmeanc(groundPoints);
+    Zmax_clean = Zmaxc(groundPoints);
+    Zmin_clean = Zminc(groundPoints);
+    Zmode_clean = Zmodec(groundPoints);
+    Zstd_clean = Zstdc(groundPoints);
+
+%% save struct
     L1(n+N).Dates = utcTime(1);
     L1(n+N).X = X_clean;
     L1(n+N).Y = Y_clean;
     L1(n+N).Zmean = Zmean_clean;
+    L1(n+N).Zmax = Zmax_clean;
     L1(n+N).Zmin = Zmin_clean;
-    L1(n+N).Zstd = Zstd_clean;
+    L1(n+N).Zstdv = Zstd_clean;
     L1(n+N).Zmode = Zmode_clean;
-    save(outputPath, 'L1', '-v7.3');
-    fprintf('Processed hour %d/%d: %s\n', n, num_to_process, datestr(Xtime));
+    % save(outputPath, 'L1', '-v7.3');
+    % fprintf('Processed hour %d/%d: %s\n', n, num_to_process, datestr(Xtime));
 
 end
-
+%end
 %%
 % Define the filename for storing the plot data
 jsonFilename = 'lidar_plot_data.json';
 load('stackpos.mat');
 plotIdx = 1:numel(L1); dt = 1;
 
-if numel(L1) > 120
-    plotIdx = find([L1.Dates] >= [L1(end-72).Dates]);
-    dt = 6;
+if numel(L1) > 24
+    plotIdx = find([L1.Dates] >= [L1(end-240).Dates]);
+    dt = 48;
 
 end
 % --- STEP 4: Plot and store data ---
 % figure(1); clf
-% z1da = [];
+z1da = [];
 plotData = struct('dates', {}, 'x', {}, 'z', {}, 'color', {});
 colors = repmat([0.6 0.6 0.6], numel(plotIdx), 1);  % dull gray
 colors(end, :) = [0 0.5 1];  % bold blue for latest
@@ -194,56 +209,38 @@ for j = 1:dt:numel(plotIdx)
     [x1d, Z3D] = Get3_1Dprofiles(X, Y, Z);
     z1d = Z3D(5, x1d <= 50);  % Profile at fixed y-index
     x1d_crop = x1d(x1d <= 50);
+   
+    % plot(x1d_crop, movmean(z1d,5), '-', 'Color', colors(j,:), 'LineWidth', 4*(j/numel(plotIdx)), 'DisplayName', datestr(L1(i).Dates)); hold on
 
-    plot(x1d_crop, movmean(z1d,5), '-', 'Color', colors(j,:), 'LineWidth', round(numel(plotIdx)/(numel(plotIdx) - j/1.3)), 'DisplayName', datestr(L1(i).Dates)); hold on
-    plot(x1d_crop, movmean(z1d,5), '-', 'Color', colors(j,:), 'LineWidth', round((j + numel(L1)+1)/numel(L1)), 'DisplayName', datestr(L1(i).Dates)); hold on
-% % end
     % Save to structure for JSON
     plotData(j).dates = datestr(L1(i).Dates);
     plotData(j).x = x1d_crop;
     plotData(j).z = z1d;
     plotData(j).color = colors(j,:);
-    % for i = 1:5
-        scatter([stackplotData.x], [stackplotData.z], 100, 'r^', 'filled','HandleVisibility', 'off');
-    % end
 end
 
+% % Optional: add MHHW, MHW, MSL lines
+% MHHW = 1.566; MSL = 0.774; MHW = 1.344;
+% plot([0 50], [MHHW MHHW], 'k--', 'handlevisibility', 'off'); text(5, MHHW+0.05, 'MHHW')
+% plot([0 50], [MHW MHW], 'k--', 'handlevisibility', 'off'); text(5, MHW+0.05, 'MHW')
+% plot([0 50], [MSL MSL], 'k--', 'handlevisibility', 'off'); text(5, MSL+0.05, 'MSL')
+% grid on; legend show
+% title(['Recent 1D Profiles since' datestr(L1(end-numel(plotIdx)).Dates)] );
+% xlabel('Cross-shore Distance (m)');
+% ylabel('Elevation (NAVD88)');
+% ylim([0.5 3.5]); xlim([0 50]);
+% set(gcf, 'color', 'w')
+% ax1=gca; ax1.FontSize=14;
 
-plotData.stackx = [stackplotData.x];
-plotData.stackz = [stackplotData.z];
-% Optional: add MHHW, MHW, MSL lines
-MHHW = 1.566; MSL = 0.774; MHW = 1.344;
-plot([0 50], [MHHW MHHW], 'k--', 'handlevisibility', 'off'); text(5, MHHW+0.05, 'MHHW')
-plot([0 50], [MHW MHW], 'k--', 'handlevisibility', 'off'); text(5, MHW+0.05, 'MHW')
-plot([0 50], [MSL MSL], 'k--', 'handlevisibility', 'off'); text(5, MSL+0.05, 'MSL')
+% scatter([stackplotData.x], [stackplotData.z], 100, 'r^', 'filled','HandleVisibility', 'off');
+outData = struct();
+outData.profiles = plotData;  % this is the array of profiles
+outData.stackx = [stackplotData.x];
+outData.stackz = [stackplotData.z];
+% outData.MHHW = [1.566 1.566]; outData.MSL = [0.774 0.774]; outData.MHW = [1.344 1.344];
+% outData.datumsx = [ 0 50]; 
 
-grid on; legend show
-title(['Recent 1D Profiles on' datestr(L1(end).Dates)] );
-xlabel('Cross-shore Distance (m)');
-ylabel('Elevation (NAVD88)');
-ylim([0.5 3.5]); xlim([0 50]);
-set(gcf, 'color', 'w')
-ax1=gca; ax1.FontSize=14;
 % --- STEP 5: Save the data to JSON file ---
 fid = fopen(jsonFilename, 'w');
-fprintf(fid, '%s', jsonencode(plotData));
+fprintf(fid, '%s', jsonencode(outData));
 fclose(fid);
-
-
-    % %%
-    % figure(2); set(gcf, 'position', [100 200 1000 1000]);clf
-    % scatter3(X, Y, Z, 5, 'k', 'filled');hold on
-    % title(['Raw Point Cloud for ' datestr(utcTime(1))])
-    % xlabel('Xutm'); ylabel('Yutm');
-    % set(gcf, 'Color', 'w');
-    % ax1=gca; ax1.FontSize = 16;
-    % %%
-    % clf
-    % scatter3(Xutm, Yutm, Zmean, 5, 'k', 'filled');
-    % title(['Rasterized and fitlered Point Cloud for ' datestr(utcTime(1))])
-    % xlabel('Xutm'); ylabel('Yutm');
-    % set(gcf, 'Color', 'w');
-    % ax1=gca; ax1.FontSize = 16;
-    % %%
-    % hold on
-    % scatter3(X_clean, Y_clean, Zmean_clean, 5, 'r', 'filled');hold on
