@@ -62,7 +62,7 @@
 %------------------------------------------------------------------------%%
 
 % Load config
-config = jsondecode(fileread('livox_config2.json'));
+config = jsondecode(fileread('livox_config.json'));
 dataFolder = config.dataFolder;
 ProcessFolder = config.processFolder;
 plotFolder = config.plotFolder;
@@ -83,7 +83,7 @@ fileNames = fileNames(sortIdx);
 % Define reference time (latest file)
 latestDate = fileDates(end);
 % Define time threshold (4 days prior)
-cutoffDate = latestDate - days(2);
+cutoffDate = latestDate - days(10);
 % Find indices of files within the past 2 days
 recentIdx = fileDates >= cutoffDate;
 % Subset filenames and datetimes
@@ -95,7 +95,8 @@ fileDatesRounded = dateshift(recentFileDates, 'start', 'day');
 uniqueDays = unique(fileDatesRounded);
 %%
 L1all = [];
-for d = 1:numel(uniqueDays)
+% for d = 1:numel(uniqueDays)
+d = 3;
 % Find all files from this day
     thisDay = uniqueDays(d);
     idxToday = find(fileDatesRounded == thisDay);
@@ -112,23 +113,24 @@ for d = 1:numel(uniqueDays)
                     'Zmax', {}, 'Zmin', {}, 'Zmode', {}, 'Zstd', {});
         N = 0;
     end
-
+%%
     % Process files for this day
     j = 1;
-    for i = idxToday
+    % for i = idxToday
+    i = 63;
         thisFile = fullfile(dataFolder, recentFileNames{i});
         % Round datenum for existence check
         thisHour = roundToHalfHour(recentFileDates(i)); 
         % Extract all existing rounded datenums from L1_day
         processedHours = roundToHalfHour([L1_day.Dates]);
         % Check if current file has already been processed
-        if ~isempty(processedHours) && any(abs(processedHours - thisHour) < 1e-6)
-            fprintf('Skipping already processed file: %s\n', recentFileNames{i});
-            L1all = [L1all L1_day];
-            continue;
-        end
+        % if ~isempty(processedHours) && any(abs(processedHours - thisHour) < 1e-6)
+        %     fprintf('Skipping already processed file: %s\n', recentFileNames{i});
+        %     L1all = [L1all L1_day];
+        %     % continue;
+        % end
         N = numel(L1_day);
-        try
+        % try
             % Process lidar file
             L1_append = process_lidar_L1(thisFile, tmatrix, bounds);  % Your processing function
             % remove fields I don't want in there
@@ -153,14 +155,14 @@ for d = 1:numel(uniqueDays)
             L1all = [L1all L1_day];
             save(outPath, 'L1_day');
             fprintf('Processed hour %d/%d: %s\n', j, numToday, datestr(thisHour));
-        catch ME
-            warning('Failed processing %s: %s', recentFileNames{i}, ME.message);
-            continue;
-        end
+        % catch ME
+        %     warning('Failed processing %s: %s', recentFileNames{i}, ME.message);
+        %     continue;
+        % end
         j = j + 1;
-    end
+    % end
     fprintf('Processed day %d/%d: %s\n', d, numel(uniqueDays), datestr(thisDay));
-end
+% end
 %% --- STEP 6: save Plot data for export to html webserver ---
 % load the stack positions data
 % adjust L1all

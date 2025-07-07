@@ -64,55 +64,46 @@
 
 
 %% Load config JSON
+% Load config
 config = jsondecode(fileread('livox_config.json'));
 dataFolder = config.dataFolder;
 ProcessFolder = config.processFolder;
-outputPath = fullfile(ProcessFolder, config.outputFile);
+plotFolder = config.plotFolder;
 tmatrix = config.transformMatrix;
 bounds = config.LidarBoundary;
-%% Load existing LO structure if available
-if isfile(outputPath)
-    load(outputPath); % loads struct labeled (L1)
-    % varNames = fieldnames(S);
-    % L0_varname = varNames{contains(varNames, 'L0')};
-    % L0 = S.(L0_varname);
-
-    % Start from next hour after last timestamp
-    N = numel(L1);
-    Start = L1(end).Dates; 
-else
-    % No existing DO — start fresh
-    L1 = struct('Dates', {}, 'X', {}, 'Y', {}, 'Zmean', {},'Zmax', {}, ...
-                'Zmin', {}, 'Zstdv', {}, 'Zmode', {});
-    N = 0;
-    % Default earliest start time (first of April as fallback)
-    Start = datetime(2025, 05, 01); Start.TimeZone = 'UTC';
-end
-
-% get the files
+%%
+% Get LiDAR files
 fileList = dir(fullfile(dataFolder, 'do-lidar_*.laz'));
-
-% Extract just the epoch part from filenames
 fileNames = {fileList.name};
-epochStrings = erase(fileNames, 'do-lidar_');   % remove prefix
-epochStrings = erase(epochStrings, '.laz');     % remove extension
+epochStrings = erase(erase(fileNames, 'do-lidar_'), '.laz');
+% lidar filenames are in UTC? matlab adds 7 hours to get in UTC
+fileDates = datetime(str2double(epochStrings), 'ConvertFrom', 'posixtime', 'TimeZone','local');
 
-% Convert epoch strings to numbers
-epochNumbers = str2double(epochStrings);
+% Sort files by timestamp
+[fileDates, sortIdx] = sort(fileDates);
+fileNames = fileNames(sortIdx);
 
-% Convert to datetime
-fileDates = datetime(epochNumbers, 'ConvertFrom', 'posixtime', 'TimeZone','UTC');
-validDates = fileDates(fileDates > Start);
-validFiles = fileNames(fileDates > Start);
-% Example: get nearest hour for last file
-End = dateshift(fileDates(end), 'start', 'hour', 'nearest');
-num_to_process = numel(validDates);
+% Define reference time (latest file)
+latestDate = fileDates(end);
+% Define time threshold (4 days prior)
+cutoffDate = latestDate - days(10);
+% Find indices of files within the past 2 days
+recentIdx = fileDates >= cutoffDate;
+% Subset filenames and datetimes
+recentFileDates = fileDates(recentIdx);
+recentFileNames = fileNames(recentIdx);
+num_to_process = numel(recentFileDates);
+% Round fileDates to day (or half-hour) for grouping
+fileDatesRounded = dateshift(recentFileDates, 'start', 'day');
+uniqueDays = unique(fileDatesRounded);
 %% Enter the loop 
 %if numel(validFiles) >= 1
     % start the loop
-for n = 1:num_to_process
+% for n = 1:num_to_process
+% n = num_to_process;
+n = 68;
     currentFile = fullfile(dataFolder, validFiles{n});
-    Xtime = validDates(n);
+    Xtime = validDates(63);
 
     lasreader = lasFileReader(currentFile);
     [ptCloud, Attributes] = readPointCloud(lasreader, 'Attributes','GPSTimeStamp');
@@ -178,7 +169,7 @@ for n = 1:num_to_process
     % save(outputPath, 'L1', '-v7.3');
     % fprintf('Processed hour %d/%d: %s\n', n, num_to_process, datestr(Xtime));
 
-end
+% end
 %end
 %%
 % Define the filename for storing the plot data
