@@ -110,7 +110,7 @@ num_to_process = numel(validDates);
     %fprintf('no pointclouds to process')
 %end
 % for n = 1:num_to_process
-n = 30;
+n = 30; % an hour of data (5 min or 20min)
     currentFile = fullfile(dataFolder, validFiles{n});
     Xtime = validDates(n);
 
