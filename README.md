@@ -13,4 +13,9 @@
  ---> raw point clouds are inputted, and data along a centered transect is accumulated to Z,X,Y,I (t) arrays, then formatted as 1D transects using 
  Get_1D_profiles_swash_accum 
  get_runupStats_L2 produces a runup edge in spatial coordinates and vertical elevations. 
- 
+
+
+%%%%%%
+ Codes were made by Ashton Domi for his PhD thesis 
+ with the Coastal Processes Group,
+ Scripps Institution of Oceanography
