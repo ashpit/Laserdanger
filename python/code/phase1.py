@@ -1,0 +1,192 @@
+"""
+Phase 1: ingest and preprocessing utilities for LiDAR point clouds.
+The functions here are pure/side-effect free to make later stages easy to test.
+"""
+from __future__ import annotations
+
+import json
+import math
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable, List, Optional, Sequence, Tuple
+
+import numpy as np
+
+# Type aliases
+ArrayLike = np.ndarray
+
+
+@dataclass(frozen=True)
+class Config:
+    data_folder: Path
+    process_folder: Path
+    plot_folder: Path
+    transform_matrix: ArrayLike
+    lidar_boundary: ArrayLike  # shape (N, 2)
+
+
+def load_config(path: Path) -> Config:
+    """
+    Load configuration from JSON and coerce to strong types.
+    Required keys: dataFolder, processFolder, plotFolder, transformMatrix, LidarBoundary.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    required = ["dataFolder", "processFolder", "plotFolder", "transformMatrix", "LidarBoundary"]
+    missing = [k for k in required if k not in raw]
+    if missing:
+        raise ValueError(f"Config missing keys: {', '.join(missing)}")
+
+    tmatrix = np.asarray(raw["transformMatrix"], dtype=float)
+    if tmatrix.shape != (4, 4):
+        raise ValueError(f"transformMatrix must be 4x4, got {tmatrix.shape}")
+
+    boundary = np.asarray(raw["LidarBoundary"], dtype=float)
+    if boundary.ndim != 2 or boundary.shape[1] != 2 or boundary.shape[0] < 3:
+        raise ValueError("LidarBoundary must be Nx2 with at least 3 vertices")
+
+    return Config(
+        data_folder=Path(raw["dataFolder"]),
+        process_folder=Path(raw["processFolder"]),
+        plot_folder=Path(raw["plotFolder"]),
+        transform_matrix=tmatrix,
+        lidar_boundary=boundary,
+    )
+
+
+def discover_laz_files(
+    folder: Path, start: Optional[datetime] = None, end: Optional[datetime] = None
+) -> List[Tuple[Path, datetime]]:
+    """
+    Find do-lidar_*.laz files, parse POSIX timestamps from filenames, and sort them.
+    Filters by [start, end] if provided (naive datetimes interpreted as local).
+    """
+    paths = list(folder.glob("do-lidar_*.laz"))
+    results: List[Tuple[Path, datetime]] = []
+    for p in paths:
+        stem = p.stem.replace("do-lidar_", "")
+        try:
+            ts = datetime.fromtimestamp(int(stem), tz=timezone.utc)
+        except (ValueError, OSError):
+            continue
+        results.append((p, ts))
+
+    if start:
+        s = _ensure_tz(start)
+        results = [(p, t) for p, t in results if t >= s]
+    if end:
+        e = _ensure_tz(end)
+        results = [(p, t) for p, t in results if t <= e]
+
+    return sorted(results, key=lambda x: x[1])
+
+
+def transform_points(points: ArrayLike, tmatrix: ArrayLike) -> ArrayLike:
+    """
+    Apply homogeneous transform to 3D points.
+    points: (N,3), tmatrix: (4,4)
+    """
+    if points.shape[1] != 3:
+        raise ValueError("points must have shape (N, 3)")
+    if tmatrix.shape != (4, 4):
+        raise ValueError("tmatrix must be 4x4")
+
+    ones = np.ones((points.shape[0], 1), dtype=float)
+    hom = np.hstack([points, ones])
+    transformed = hom @ tmatrix.T
+    return transformed[:, :3]
+
+
+def filter_by_polygon(points: ArrayLike, polygon: ArrayLike, eps: float = 1e-9) -> ArrayLike:
+    """
+    Return boolean mask of points inside a polygon (ray casting), including edge points.
+    points: (N,2); polygon: (M,2) closed or open.
+    """
+    x = points[:, 0]
+    y = points[:, 1]
+    poly_x = polygon[:, 0]
+    poly_y = polygon[:, 1]
+    n = len(polygon)
+    inside = np.zeros(len(points), dtype=bool)
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly_x[i], poly_y[i]
+        xj, yj = poly_x[j], poly_y[j]
+        intersect = ((yi > y) != (yj > y)) & (
+            x <= (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi + eps
+        )
+        inside ^= intersect
+        j = i
+    # Include points lying on polygon edges
+    on_edge = np.zeros(len(points), dtype=bool)
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly_x[i], poly_y[i]
+        xj, yj = poly_x[j], poly_y[j]
+        dx = xj - xi
+        dy = yj - yi
+        # Project point onto segment and check distance to line
+        t = ((x - xi) * dx + (y - yi) * dy) / (dx * dx + dy * dy + 1e-20)
+        on_segment = (t >= -eps) & (t <= 1 + eps)
+        proj_x = xi + t * dx
+        proj_y = yi + t * dy
+        dist2 = (x - proj_x) ** 2 + (y - proj_y) ** 2
+        on_edge |= on_segment & (dist2 <= eps)
+        j = i
+    return inside | on_edge
+
+
+def filter_points(
+    points: ArrayLike,
+    intensities: ArrayLike,
+    times: ArrayLike,
+    polygon: ArrayLike,
+    intensity_threshold: float = 100.0,
+    max_seconds: Optional[float] = 300.0,
+) -> ArrayLike:
+    """
+    Filter by polygon, intensity, and optional time window.
+    times: seconds from start; max_seconds=None disables time limit.
+    Returns boolean mask of kept points.
+    """
+    if not (len(points) == len(intensities) == len(times)):
+        raise ValueError("points, intensities, and times must have the same length")
+
+    keep = filter_by_polygon(points[:, :2], polygon)
+    keep &= intensities < intensity_threshold
+    if max_seconds is not None:
+        keep &= times <= max_seconds
+    return keep
+
+
+def prepare_batch(
+    points: ArrayLike,
+    intensities: ArrayLike,
+    gps_times: ArrayLike,
+    config: Config,
+    intensity_threshold: float = 100.0,
+    max_seconds: Optional[float] = 300.0,
+) -> Tuple[ArrayLike, ArrayLike, ArrayLike]:
+    """
+    Convenience helper: transform points, apply filters, and return filtered arrays.
+    """
+    transformed = transform_points(points, config.transform_matrix)
+    # GPS times in seconds relative to first sample
+    rel_times = gps_times - gps_times.min()
+    mask = filter_points(
+        transformed,
+        intensities,
+        rel_times,
+        config.lidar_boundary,
+        intensity_threshold=intensity_threshold,
+        max_seconds=max_seconds,
+    )
+    return transformed[mask], intensities[mask], rel_times[mask]
+
+
+def _ensure_tz(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)

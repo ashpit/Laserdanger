@@ -1,0 +1,9 @@
+# Core scientific stack
+numpy>=1.26
+scipy>=1.12
+laspy>=2.5
+xarray>=2024.2.0
+pandas>=2.1
+
+# Tooling and tests
+pytest>=7.4
