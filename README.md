@@ -40,7 +40,17 @@ The repository implements a two-level processing pipeline to analyze coastal mor
     1.  **Temporal Accumulation:** Uses `accumpts_L2.m` to bin data in both space and time (~2Hz).
     2.  **Profile Extraction:** Generates `Z(x,t)`, `X(x,t)`, and `I(x,t)` arrays along a centered transect.
     3.  **Runup Detection:** `get_runupStats_L2.m` identifies the instantaneous water edge.
-    4.  **Analysis:** Computes spectral statistics (IG vs. Incident band), beach slope (beta), and runup time series.
+    *   Analysis: Computes spectral stats (IG vs. Incident band), beach slope (beta), and runup time series.
+
+### Python Port (New)
+A modern, modular Python implementation of the pipeline is currently in development under `python/code/`.
+*   **Goal:** Replicate MATLAB L1 functionality using a robust, open-source stack (numpy, scipy, xarray).
+*   **Structure:**
+    *   **Phase 1:** Pure ingestion & preprocessing.
+    *   **Phase 2:** Core algorithms (binning, filtering).
+    *   **Phase 3:** Data modeling with xarray.
+    *   **Phase 4:** Pipeline orchestration.
+*   **Documentation:** See [AGENTS.md](AGENTS.md) for detailed architecture and usage of the Python modules.
 
 ---
 

@@ -14,6 +14,13 @@ from scipy.stats import binned_statistic_2d
 ArrayLike = np.ndarray
 
 
+def bin_edges(values: ArrayLike, bin_size: float) -> ArrayLike:
+    """
+    Public helper to build inclusive bin edges. Ensures at least two bins.
+    """
+    return _bin_edges(values, bin_size)
+
+
 @dataclass(frozen=True)
 class BinnedGrid:
     x_edges: ArrayLike
@@ -93,14 +100,16 @@ def residual_kernel_filter(
     Simple residual-based ground filter.
     For each point, fit a plane to neighbors within window_radius and keep the point
     if its residual is <= max_residual. Returns boolean mask of ground points.
+    Note: still O(N) fits; for large tiles, consider tiling/striding upstream.
     """
     if points.shape[1] != 3:
         raise ValueError("points must have shape (N, 3)")
 
     tree = cKDTree(points[:, :2])
     keep = np.zeros(len(points), dtype=bool)
+    neighbor_lists = tree.query_ball_point(points[:, :2], r=window_radius)
     for idx, (x, y, z) in enumerate(points):
-        neighbor_idx = tree.query_ball_point([x, y], r=window_radius)
+        neighbor_idx = neighbor_lists[idx]
         if len(neighbor_idx) < min_neighbors:
             continue
         neighbor_pts = points[neighbor_idx]

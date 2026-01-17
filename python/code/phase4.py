@@ -50,9 +50,12 @@ def process_l1(
     intensity_threshold: float = 100.0,
     max_seconds: Optional[float] = 300.0,
     loader: Optional[LoaderFn] = None,
+    edge_percentile: Optional[Tuple[float, float]] = (1.0, 99.0),
+    edge_padding_bins: int = 1,
 ) -> phase3.xr.Dataset:
     """
     Orchestrate L1 processing: discover files -> load -> transform/filter -> bin -> stack.
+    Edges are shared across batches; optional percentile clipping reduces empty-grid blowup.
     Returns an xarray.Dataset; caller may persist to NetCDF/Parquet as needed.
     """
     cfg = phase1.load_config(config_path)
@@ -80,10 +83,23 @@ def process_l1(
     if not batches:
         raise RuntimeError("All files filtered out; no grids produced")
 
-    # Use common bin edges across all batches so datasets align
-    all_points = np.vstack([b[0] for b in batches])
-    x_edges = _bin_edges(all_points[:, 0], bin_size)
-    y_edges = _bin_edges(all_points[:, 1], bin_size)
+    # Use common bin edges across all batches so datasets align; avoid vstack to save memory.
+    x_min = min(np.min(b[0][:, 0]) for b in batches)
+    x_max = max(np.max(b[0][:, 0]) for b in batches)
+    y_min = min(np.min(b[0][:, 1]) for b in batches)
+    y_max = max(np.max(b[0][:, 1]) for b in batches)
+    if edge_percentile:
+        lo, hi = edge_percentile
+        x_samples = np.hstack([np.percentile(b[0][:, 0], [lo, hi]) for b in batches])
+        y_samples = np.hstack([np.percentile(b[0][:, 1], [lo, hi]) for b in batches])
+        # Clip extrema to reduce massive empty grids, but keep a small padding.
+        x_min = max(x_min, x_samples.min() - edge_padding_bins * bin_size)
+        x_max = min(x_max, x_samples.max() + edge_padding_bins * bin_size)
+        y_min = max(y_min, y_samples.min() - edge_padding_bins * bin_size)
+        y_max = min(y_max, y_samples.max() + edge_padding_bins * bin_size)
+
+    x_edges = phase2.bin_edges(np.array([x_min, x_max]), bin_size)
+    y_edges = phase2.bin_edges(np.array([y_min, y_max]), bin_size)
 
     grids = []
     for f_points, ts in batches:
@@ -100,16 +116,3 @@ def save_dataset(ds: phase3.xr.Dataset, output_path: Path) -> None:
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ds.to_netcdf(output_path)
-
-
-def _bin_edges(values: np.ndarray, bin_size: float) -> np.ndarray:
-    vmin = float(np.min(values))
-    vmax = float(np.max(values))
-    min_edge = bin_size * np.floor(vmin / bin_size)
-    max_edge = bin_size * np.ceil(vmax / bin_size)
-    if max_edge <= min_edge:
-        max_edge = min_edge + bin_size
-    edges = np.arange(min_edge, max_edge + bin_size, bin_size)
-    if len(edges) < 3:
-        edges = np.append(edges, edges[-1] + bin_size)
-    return edges

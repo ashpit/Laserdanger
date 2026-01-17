@@ -61,7 +61,7 @@ def discover_laz_files(
 ) -> List[Tuple[Path, datetime]]:
     """
     Find do-lidar_*.laz files, parse POSIX timestamps from filenames, and sort them.
-    Filters by [start, end] if provided (naive datetimes interpreted as local).
+    Filters by [start, end] if provided (naive datetimes interpreted as UTC).
     """
     paths = list(folder.glob("do-lidar_*.laz"))
     results: List[Tuple[Path, datetime]] = []

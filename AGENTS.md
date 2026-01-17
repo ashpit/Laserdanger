@@ -57,5 +57,21 @@ The Python implementation (`python/code/`) is designed as a modular, functional 
 *   **Xarray Integration:**
     *   `grid_to_dataset(grid, timestamp)`: Converts a single grid into a labeled `xarray.Dataset` with coordinates `(y, x)` and variables (`elevation`, `snr`, etc.).
     *   `build_dataset(grids)`: Stacks multiple processed grids along a `time` dimension.
-*   **Output:**
+*   **Outcome:**
     *   Produces a 3D `(time, y, x)` DataCube, enabling powerful slicing (e.g., "get elevation profile at x=100 for all times") and NetCDF export.
+
+## Phase 4: Orchestration (`phase4.py`)
+**Role:** The "Driver" layer. Handles I/O and pipeline execution.
+*   **Data Loading:**
+    *   `load_laz_points(path)`: Uses `laspy` to read binary `.laz` files, extracting coordinates, intensity, and GPS time. Handles header scaling automatically.
+*   **Pipeline Driver:**
+    *   `process_l1(config_path, ...)`: The main entry point for L1 processing.
+    *   **Workflow:**
+        1.  Loads Config.
+        2.  Discovers files within date range.
+        3.  **Batch Loop:** Loads -> Transforms -> Filters (Phase 1) for each file.
+        4.  **Alignment:** Computes global grid edges across *all* files to ensure spatial alignment.
+        5.  **Binning:** Rasterizes each file onto the common grid (Phase 2).
+        6.  **Assembly:** Stacks grids into an xarray Dataset (Phase 3).
+*   **Export:**
+    *   `save_dataset(ds, path)`: Saves the processed DataCube to NetCDF.

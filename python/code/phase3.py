@@ -28,9 +28,6 @@ def grid_to_dataset(grid: BinnedGrid, timestamp: datetime) -> xr.Dataset:
     x_centers = _bin_centers(grid.x_edges)
     y_centers = _bin_centers(grid.y_edges)
     coords = {"y": y_centers, "x": x_centers}
-    def _arr(v: np.ndarray) -> np.ndarray:
-        return np.expand_dims(v.T, axis=0)  # transpose to (y, x)
-
     ds = xr.Dataset(
         data_vars={
             "elevation": (("y", "x"), grid.z_mean.T),
@@ -49,9 +46,14 @@ def grid_to_dataset(grid: BinnedGrid, timestamp: datetime) -> xr.Dataset:
             "y_edges": grid.y_edges,
         },
     )
-    # add time as a new dimension via pandas to preserve timezone-aware timestamps
-    time_index = pd.DatetimeIndex([timestamp])
-    return ds.expand_dims(time=time_index)
+    # add time as a timezone-aware dimension (always normalized to UTC)
+    idx = pd.DatetimeIndex([timestamp])
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC")
+    else:
+        idx = idx.tz_convert("UTC")
+    ds.attrs["time_timezone"] = "UTC"
+    return ds.expand_dims(time=idx)
 
 
 def build_dataset(grids: Sequence[GridWithTime]) -> xr.Dataset:
