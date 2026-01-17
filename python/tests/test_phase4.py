@@ -67,3 +67,32 @@ def test_process_l1_raises_on_no_files(tmp_path: Path) -> None:
     cfg_path.write_text(phase1.json.dumps(payload), encoding="utf-8")
     with pytest.raises(FileNotFoundError):
         phase4.process_l1(cfg_path, loader=fake_loader_factory([]))
+
+
+def test_process_l1_data_folder_override(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "cfg.json"
+    payload = {
+        "dataFolder": str(tmp_path / "unused"),
+        "processFolder": str(tmp_path / "proc"),
+        "plotFolder": str(tmp_path / "plots"),
+        "transformMatrix": np.eye(4).tolist(),
+        "LidarBoundary": [[0, 0], [2, 0], [2, 2], [0, 2]],
+    }
+    cfg_path.write_text(phase1.json.dumps(payload), encoding="utf-8")
+
+    override_folder = tmp_path / "override"
+    override_folder.mkdir()
+    ts = int(datetime(2025, 1, 1, tzinfo=timezone.utc).timestamp())
+    (override_folder / f"do-lidar_{ts}.laz").write_text("stub", encoding="utf-8")
+
+    pts = np.array([[0.1, 0.1, 1.0], [0.2, 0.2, 1.0]])
+    loader = fake_loader_factory([pts])
+
+    ds = phase4.process_l1(
+        cfg_path,
+        bin_size=1.0,
+        mode_bin=0.1,
+        loader=loader,
+        data_folder_override=override_folder,
+    )
+    assert ds.sizes["time"] == 1

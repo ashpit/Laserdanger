@@ -55,3 +55,28 @@ def test_residual_kernel_filter_removes_outlier() -> None:
     mask = phase2.residual_kernel_filter(pts, window_radius=0.8, max_residual=0.2, min_neighbors=4)
     assert mask.sum() == len(base)  # all plane points kept, outlier dropped
     assert not mask[-1]
+
+
+def test_bin_point_cloud_temporal() -> None:
+    pts = np.array(
+        [
+            [0.1, 0.0, 1.0],
+            [0.2, 0.0, 1.5],
+            [0.1, 0.0, 2.0],
+            [1.2, 0.0, 3.0],
+        ]
+    )
+    intensities = np.array([10.0, 14.0, 20.0, 30.0])
+    times = np.array([0.1, 0.2, 0.6, 1.1])
+
+    grid = phase2.bin_point_cloud_temporal(
+        pts, intensities, times, x_bin_size=1.0, time_bin_size=0.5
+    )
+
+    assert grid.z_mean.shape == (3, 2)  # 3 time bins, 2 x bins
+    np.testing.assert_allclose(np.diff(grid.t_edges), 0.5)
+    np.testing.assert_allclose(grid.z_mean[0, 0], 1.25)  # first time bin average z
+    np.testing.assert_allclose(grid.z_mean[1, 0], 2.0)  # middle time bin single point
+    np.testing.assert_allclose(grid.z_mean[2, 1], 3.0)  # last bin second x column
+    assert np.isnan(grid.z_mean[2, 0]) and grid.count[2, 0] == 0  # empty cell normalized to NaN
+    np.testing.assert_allclose(grid.intensity_mean[0, 0], 12.0)

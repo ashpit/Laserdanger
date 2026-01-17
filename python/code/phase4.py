@@ -5,6 +5,7 @@ This keeps I/O thin and composes the pure functions from phases 1–3.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple
@@ -50,6 +51,7 @@ def process_l1(
     intensity_threshold: float = 100.0,
     max_seconds: Optional[float] = 300.0,
     loader: Optional[LoaderFn] = None,
+    data_folder_override: Optional[Path] = None,
     edge_percentile: Optional[Tuple[float, float]] = (1.0, 99.0),
     edge_padding_bins: int = 1,
 ) -> phase3.xr.Dataset:
@@ -59,6 +61,8 @@ def process_l1(
     Returns an xarray.Dataset; caller may persist to NetCDF/Parquet as needed.
     """
     cfg = phase1.load_config(config_path)
+    if data_folder_override is not None:
+        cfg = replace(cfg, data_folder=Path(data_folder_override))
     laz_files = phase1.discover_laz_files(cfg.data_folder, start=start, end=end)
     if not laz_files:
         raise FileNotFoundError("No matching .laz files found")

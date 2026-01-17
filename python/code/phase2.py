@@ -34,6 +34,18 @@ class BinnedGrid:
     snr: ArrayLike
 
 
+@dataclass(frozen=True)
+class TimeResolvedGrid:
+    x_edges: ArrayLike
+    t_edges: ArrayLike
+    z_mean: ArrayLike
+    z_min: ArrayLike
+    z_max: ArrayLike
+    z_std: ArrayLike
+    count: ArrayLike
+    intensity_mean: ArrayLike
+
+
 def bin_point_cloud(
     points: ArrayLike,
     bin_size: float = 0.1,
@@ -75,6 +87,62 @@ def bin_point_cloud(
         z_mode=z_mode,
         count=count,
         snr=snr,
+    )
+
+
+def bin_point_cloud_temporal(
+    points: ArrayLike,
+    intensities: ArrayLike,
+    times: ArrayLike,
+    x_bin_size: float = 0.1,
+    time_bin_size: float = 0.5,
+    x_edges: ArrayLike | None = None,
+    t_edges: ArrayLike | None = None,
+) -> TimeResolvedGrid:
+    """
+    Bin points into cross-shore/time cells (Z(x,t)) and compute per-bin statistics.
+    Returns arrays shaped (t_bins, x_bins) with time as the first axis.
+    Default time_bin_size=0.5 seconds targets ~2 Hz resolution.
+    """
+    points = np.asarray(points)
+    intensities = np.asarray(intensities)
+    times = np.asarray(times)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("points must have shape (N, 3)")
+    if points.shape[0] != intensities.shape[0] or points.shape[0] != times.shape[0]:
+        raise ValueError("points, intensities, and times must have the same length")
+    if x_bin_size <= 0 or time_bin_size <= 0:
+        raise ValueError("x_bin_size and time_bin_size must be positive")
+
+    x_vals = points[:, 0]
+    z_vals = points[:, 2]
+
+    x_edges = _bin_edges(x_vals, x_bin_size) if x_edges is None else x_edges
+    t_edges = _bin_edges(times, time_bin_size) if t_edges is None else t_edges
+
+    z_mean, _, _, _ = binned_statistic_2d(times, x_vals, z_vals, statistic="mean", bins=[t_edges, x_edges])
+    z_min, _, _, _ = binned_statistic_2d(times, x_vals, z_vals, statistic="min", bins=[t_edges, x_edges])
+    z_max, _, _, _ = binned_statistic_2d(times, x_vals, z_vals, statistic="max", bins=[t_edges, x_edges])
+    z_std, _, _, _ = binned_statistic_2d(times, x_vals, z_vals, statistic="std", bins=[t_edges, x_edges])
+    count, _, _, _ = binned_statistic_2d(times, x_vals, z_vals, statistic="count", bins=[t_edges, x_edges])
+    intensity_mean, _, _, _ = binned_statistic_2d(
+        times, x_vals, intensities, statistic="mean", bins=[t_edges, x_edges]
+    )
+
+    # Normalize empty bins to NaN for consistency across statistics
+    empty_mask = count == 0
+    for arr in (z_mean, z_min, z_max, z_std, intensity_mean):
+        arr[empty_mask] = np.nan
+
+    return TimeResolvedGrid(
+        x_edges=x_edges,
+        t_edges=t_edges,
+        z_mean=z_mean,
+        z_min=z_min,
+        z_max=z_max,
+        z_std=z_std,
+        count=count,
+        intensity_mean=intensity_mean,
     )
 
 
