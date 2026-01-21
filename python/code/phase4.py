@@ -17,6 +17,7 @@ import phase1
 import phase2
 import phase3
 import profiles
+import utils
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,11 @@ def process_l2(
     apply_residual_filter: bool = True,
     residual_filter_passes: Optional[List[Tuple[float, float]]] = None,
     profile_config: Optional[profiles.TransectConfig] = None,
+    apply_outlier_detection: bool = True,
+    outlier_params: Optional[Dict] = None,
+    extract_intensity_contours: bool = False,
+    intensity_contour_thresholds: Optional[List[float]] = None,
+    multi_transect: bool = False,
 ) -> phase3.TimeResolvedDataset:
     """
     Orchestrate L2 processing: produces time-resolved Z(x,t) matrices for wave analysis.
@@ -217,7 +223,9 @@ def process_l2(
     - Temporal binning at ~2Hz (time_bin_size=0.5s default)
     - Shorter time window (2 min default vs 5 min for L1)
     - Less aggressive filtering
-    - Outputs along a single cross-shore transect
+    - Outputs along cross-shore transect(s)
+    - Optional 2D outlier detection for spike removal
+    - Optional intensity contour extraction for water edge detection
 
     Parameters
     ----------
@@ -242,12 +250,26 @@ def process_l2(
     residual_filter_passes : list, optional
         Filter passes. Default for L2: [(2, 0.5)] - less aggressive than L1
     profile_config : TransectConfig, optional
-        Configuration for the central transect
+        Configuration for transect extraction. Required for multi_transect=True.
+    apply_outlier_detection : bool
+        Apply 2D gradient/Laplacian outlier detection (default True)
+    outlier_params : dict, optional
+        Parameters for detect_outliers_conv2d(). Keys:
+        - ig_length: IG window in seconds (default 60)
+        - gradient_threshold_std: Gradient threshold in std (default 2.5)
+        - laplacian_threshold_std: Laplacian threshold in std (default 2.5)
+    extract_intensity_contours : bool
+        Extract intensity contours for water edge detection (default False)
+    intensity_contour_thresholds : list, optional
+        Intensity thresholds for contour extraction (default [20, 30, 40, 50])
+    multi_transect : bool
+        Extract multiple transects at all alongshore offsets in profile_config
+        (default False = single central transect only)
 
     Returns
     -------
     TimeResolvedDataset
-        Contains Z(x,t), I(x,t), and metadata
+        Contains Z(x,t), I(x,t), outlier mask, intensity contours, and metadata
     """
     if residual_filter_passes is None:
         # L2 uses less aggressive filtering
@@ -314,50 +336,135 @@ def process_l2(
     intensities = np.hstack(all_intensities)
     times = np.hstack(all_times)
 
-    # Extract along a transect if config provided
+    X, Y, Z = points[:, 0], points[:, 1], points[:, 2]
+
+    # Determine transects to process
+    transect_grids: Optional[Dict[float, phase2.TimeResolvedGrid]] = None
+    primary_grid = None
+
     if profile_config is not None:
-        # Project points onto the transect
-        X, Y, Z = points[:, 0], points[:, 1], points[:, 2]
+        # Calculate transect geometry once
+        dx_line = profile_config.x2 - profile_config.x1
+        dy_line = profile_config.y2 - profile_config.y1
+        length = np.sqrt(dx_line**2 + dy_line**2)
+        line_vec = np.array([dx_line, dy_line]) / length
 
-        # Use the center transect (offset=0)
-        line_start = (profile_config.x1, profile_config.y1)
-        dx = profile_config.x2 - profile_config.x1
-        dy = profile_config.y2 - profile_config.y1
-        length = np.sqrt(dx**2 + dy**2)
-        line_vec = np.array([dx, dy]) / length
+        # Alongshore direction (perpendicular)
+        alongshore_angle = np.arctan2(dy_line, dx_line) + np.pi / 2
+        dx_along = np.cos(alongshore_angle)
+        dy_along = np.sin(alongshore_angle)
 
-        # Project points
-        proj_dist, dist_to_line, mask = profiles._project_points_to_line(
-            np.column_stack([X, Y]), line_start, line_vec, profile_config.tolerance
-        )
+        # Determine which transects to process
+        if multi_transect:
+            offsets_to_process = list(profile_config.alongshore_spacings)
+            transect_grids = {}
+        else:
+            offsets_to_process = [0.0]
 
-        # Filter to points near transect
-        points_1d = proj_dist[mask]
-        z_1d = Z[mask]
-        intensities_1d = intensities[mask]
-        times_1d = times[mask]
+        for offset in offsets_to_process:
+            # Offset transect endpoints
+            xs = profile_config.x1 + offset * dx_along
+            ys = profile_config.y1 + offset * dy_along
+            line_start = (xs, ys)
 
-        # Create pseudo-3D points for temporal binning (x=cross-shore, y=0, z=elevation)
-        points_for_binning = np.column_stack([points_1d, np.zeros_like(points_1d), z_1d])
+            # Project points onto this transect
+            proj_dist, dist_to_line, mask = profiles._project_points_to_line(
+                np.column_stack([X, Y]), line_start, line_vec, profile_config.tolerance
+            )
+
+            if mask.sum() == 0:
+                logger.warning("No points near transect at offset %.1f", offset)
+                continue
+
+            # Filter to points near transect
+            points_1d = proj_dist[mask]
+            z_1d = Z[mask]
+            intensities_1d = intensities[mask]
+            times_1d = times[mask]
+
+            # Create pseudo-3D points for temporal binning
+            points_for_binning = np.column_stack([points_1d, np.zeros_like(points_1d), z_1d])
+
+            # Temporal binning
+            grid = phase2.bin_point_cloud_temporal(
+                points_for_binning,
+                intensities_1d,
+                times_1d,
+                x_bin_size=x_bin_size,
+                time_bin_size=time_bin_size,
+            )
+
+            if multi_transect:
+                transect_grids[offset] = grid
+                if offset == 0.0 or primary_grid is None:
+                    primary_grid = grid
+            else:
+                primary_grid = grid
     else:
         # Use X coordinate directly as cross-shore
         points_for_binning = points
         intensities_1d = intensities
         times_1d = times
 
-    # Temporal binning
-    grid = phase2.bin_point_cloud_temporal(
-        points_for_binning,
-        intensities_1d,
-        times_1d,
-        x_bin_size=x_bin_size,
-        time_bin_size=time_bin_size,
-    )
+        # Temporal binning
+        primary_grid = phase2.bin_point_cloud_temporal(
+            points_for_binning,
+            intensities_1d,
+            times_1d,
+            x_bin_size=x_bin_size,
+            time_bin_size=time_bin_size,
+        )
+
+    if primary_grid is None:
+        raise RuntimeError("No valid transect data produced")
+
+    # Apply 2D outlier detection
+    outlier_mask = None
+    Z_filtered = None
+
+    if apply_outlier_detection:
+        logger.info("Applying 2D outlier detection")
+        Z_xt_raw = primary_grid.z_mean.T  # Shape (n_x, n_t)
+        dt = float(np.median(np.diff(primary_grid.t_edges)))
+
+        # Get outlier detection parameters
+        params = outlier_params or {}
+        outlier_result = utils.detect_outliers_conv2d(
+            Z_xt_raw,
+            dt=dt,
+            ig_length=params.get('ig_length', 60.0),
+            gradient_threshold_std=params.get('gradient_threshold_std', 2.5),
+            laplacian_threshold_std=params.get('laplacian_threshold_std', 2.5),
+        )
+        outlier_mask = outlier_result.is_outlier
+        Z_filtered = outlier_result.Z_filtered
+
+        n_outliers = outlier_mask.sum()
+        total = outlier_mask.size
+        logger.info("Detected %d outliers (%.1f%%)", n_outliers, 100 * n_outliers / total)
+
+    # Extract intensity contours
+    intensity_contours = None
+
+    if extract_intensity_contours:
+        logger.info("Extracting intensity contours")
+        I_xt = primary_grid.intensity_mean.T
+        x1d = (primary_grid.x_edges[:-1] + primary_grid.x_edges[1:]) / 2
+
+        thresholds = intensity_contour_thresholds or [20.0, 30.0, 40.0, 50.0]
+        intensity_contours = utils.get_intensity_contours(
+            I_xt, x1d, thresholds=thresholds
+        )
+        logger.info("Extracted %d valid intensity contours", len(intensity_contours))
 
     return phase3.TimeResolvedDataset(
-        grid=grid,
+        grid=primary_grid,
         base_time=base_time,
         profile_config=profile_config,
+        transect_grids=transect_grids,
+        outlier_mask=outlier_mask,
+        Z_filtered=Z_filtered,
+        intensity_contours=intensity_contours,
     )
 
 
