@@ -47,7 +47,8 @@ def test_process_l1_builds_dataset(tmp_path: Path) -> None:
     pts2 = np.array([[1.1, 0.1, 2.0], [1.2, 0.2, 2.0]])
     loader = fake_loader_factory([pts1, pts2])
 
-    ds = phase4.process_l1(cfg_path, bin_size=1.0, mode_bin=0.1, loader=loader)
+    result = phase4.process_l1(cfg_path, bin_size=1.0, mode_bin=0.1, loader=loader, apply_residual_filter=False)
+    ds = result.dataset
     assert ds.sizes["time"] == 2
     # First time slice should reflect z=1 in first bin
     np.testing.assert_allclose(ds["elevation"].isel(time=0)[0, 0], 1.0)
@@ -66,7 +67,7 @@ def test_process_l1_raises_on_no_files(tmp_path: Path) -> None:
     }
     cfg_path.write_text(phase1.json.dumps(payload), encoding="utf-8")
     with pytest.raises(FileNotFoundError):
-        phase4.process_l1(cfg_path, loader=fake_loader_factory([]))
+        phase4.process_l1(cfg_path, loader=fake_loader_factory([]), apply_residual_filter=False)
 
 
 def test_process_l1_data_folder_override(tmp_path: Path) -> None:
@@ -88,11 +89,12 @@ def test_process_l1_data_folder_override(tmp_path: Path) -> None:
     pts = np.array([[0.1, 0.1, 1.0], [0.2, 0.2, 1.0]])
     loader = fake_loader_factory([pts])
 
-    ds = phase4.process_l1(
+    result = phase4.process_l1(
         cfg_path,
         bin_size=1.0,
         mode_bin=0.1,
         loader=loader,
         data_folder_override=override_folder,
+        apply_residual_filter=False,
     )
-    assert ds.sizes["time"] == 1
+    assert result.dataset.sizes["time"] == 1
