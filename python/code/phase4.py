@@ -405,6 +405,8 @@ def process_l1(
     if data_folder_override is not None:
         cfg = replace(cfg, data_folder=Path(data_folder_override))
 
+    logger.info("Using data folder: %s", cfg.data_folder)
+
     if not cfg.data_folder.exists():
         raise ConfigurationError(f"Data folder does not exist: {cfg.data_folder}")
 
@@ -442,7 +444,7 @@ def process_l1(
                 points, intensities, gps_times = load_laz_points(path, validate=True)
         except CorruptFileError as e:
             if skip_corrupt:
-                logger.warning("Skipping corrupt file: %s", path.name)
+                logger.warning("Skipping file %s: %s", path.name, e.reason or str(e))
                 corrupt_files.append((path, str(e)))
                 continue
             else:
@@ -670,7 +672,7 @@ def process_l2(
                 points, intensities, gps_times = load_laz_points(path, validate=True)
         except CorruptFileError as e:
             if skip_corrupt:
-                logger.warning("Skipping corrupt file: %s", path.name)
+                logger.warning("Skipping file %s: %s", path.name, e.reason or str(e))
                 continue
             else:
                 raise
