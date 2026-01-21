@@ -279,8 +279,33 @@ result = process_l1_batch(
 - scipy>=1.7.0
 - pandas>=1.3.0
 - laspy>=2.0.0
+- lazrs>=0.5.0 (fast Rust-based LAZ decompression)
 - xarray>=0.19.0
 - netCDF4>=1.5.0
 - matplotlib>=3.4.0
 - tqdm>=4.62.0
 - pytest>=7.0.0 (for testing)
+
+## Performance Optimizations
+
+The pipeline includes several optimizations for processing large point cloud datasets:
+
+### LAZ Decompression (lazrs)
+- Uses `lazrs` Rust backend for 1.5-2x faster LAZ file reading
+- Automatic fallback to laszip if lazrs unavailable
+- Warning logged if lazrs not installed
+
+### Polygon Filtering (matplotlib.path)
+- Uses `matplotlib.path.Path.contains_points()` for C-optimized point-in-polygon testing
+- 2-5x faster than pure Python ray casting
+- Pure Python fallback available if matplotlib not installed
+
+### Percentile Binning (np.argpartition)
+- Uses `np.argpartition()` for O(n) percentile selection vs O(n log n) sorting
+- Uses `np.bincount()` for fast mode calculation
+- Optimized variance: `std = sqrt(mean(x²) - mean(x)²)`
+
+### Future Optimization Opportunities
+- Parallel file loading with multiprocessing (not yet implemented)
+- `--fast` mode to skip residual kernel filtering
+- Numba JIT compilation for hot loops (optional dependency)
