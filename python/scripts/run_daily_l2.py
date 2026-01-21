@@ -179,7 +179,7 @@ Examples:
         while current < end_date:
             day_end = current + timedelta(days=1)
             day_files = phase1.discover_laz_files(cfg.data_folder, start=current, end=day_end)
-            output_file = output_dir / f"L2_{current.strftime('%Y%m%d')}_0000.nc"
+            output_file = output_dir / f"L2_{current.strftime('%Y%m%d')}.nc"
             status = "exists" if output_file.exists() else "pending"
             print(f"  {current.strftime('%Y-%m-%d')}: {len(day_files)} files -> {output_file.name} [{status}]")
             current = day_end

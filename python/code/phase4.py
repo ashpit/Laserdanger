@@ -1141,7 +1141,7 @@ def process_l2_batch(
             )
 
             # Generate filename
-            filename = f"L2_{window_start.strftime('%Y%m%d_%H%M')}.nc"
+            filename = f"L2_{window_start.strftime('%Y%m%d')}.nc"
             output_path = output_dir / filename
             result.to_netcdf(output_path)
 
