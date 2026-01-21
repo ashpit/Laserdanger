@@ -1,15 +1,27 @@
 """
 Phase 4: orchestration/CLI-style drivers for L1/L2 processing.
 This keeps I/O thin and composes the pure functions from phases 1–3.
+
+Features:
+- L1 processing (beach surface generation)
+- L2 processing (wave-resolving analysis)
+- Batch processing with checkpointing and resume
+- Progress bars and configurable logging
+- Graceful error handling for corrupt files
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
-from dataclasses import dataclass, replace
+import os
+import sys
+import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -19,11 +31,60 @@ import phase3
 import profiles
 import utils
 
+# Configure module logger
 logger = logging.getLogger(__name__)
+
+# Try to import tqdm for progress bars, fall back to simple iteration
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    def tqdm(iterable, *args, **kwargs):
+        """Fallback when tqdm is not installed."""
+        return iterable
 
 # Loader type: given a path, return (points[N,3], intensities[N], gps_times[N])
 LoaderFn = Callable[[Path], Tuple[np.ndarray, np.ndarray, np.ndarray]]
 
+
+# =============================================================================
+# Custom Exceptions
+# =============================================================================
+
+class LidarProcessingError(Exception):
+    """Base exception for lidar processing errors."""
+    pass
+
+
+class CorruptFileError(LidarProcessingError):
+    """Raised when a LAZ file is corrupt or unreadable."""
+    def __init__(self, path: Path, reason: str = ""):
+        self.path = path
+        self.reason = reason
+        msg = f"Corrupt or unreadable LAZ file: {path}"
+        if reason:
+            msg += f" ({reason})"
+        super().__init__(msg)
+
+
+class NoDataError(LidarProcessingError):
+    """Raised when no valid data is available after filtering."""
+    def __init__(self, context: str = ""):
+        msg = "No valid data available"
+        if context:
+            msg += f": {context}"
+        super().__init__(msg)
+
+
+class ConfigurationError(LidarProcessingError):
+    """Raised when configuration is invalid or missing."""
+    pass
+
+
+# =============================================================================
+# Result Classes
+# =============================================================================
 
 @dataclass
 class L1Result:
@@ -33,24 +94,234 @@ class L1Result:
     profile_config: Optional[profiles.TransectConfig] = None
 
 
-def load_laz_points(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+@dataclass
+class BatchProgress:
+    """Progress information for batch processing."""
+    total_items: int
+    completed: int = 0
+    failed: int = 0
+    skipped: int = 0
+    current_item: str = ""
+    errors: List[Tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def success_rate(self) -> float:
+        if self.completed + self.failed == 0:
+            return 0.0
+        return self.completed / (self.completed + self.failed)
+
+
+@dataclass
+class Checkpoint:
+    """Checkpoint for resumable batch processing."""
+    config_path: str
+    output_dir: str
+    start_date: str
+    end_date: str
+    completed_dates: List[str]
+    failed_dates: List[str]
+    kwargs: Dict[str, Any]
+    timestamp: str = ""
+
+    def __post_init__(self):
+        if not self.timestamp:
+            self.timestamp = datetime.now().isoformat()
+
+    def to_dict(self) -> Dict:
+        return {
+            "config_path": self.config_path,
+            "output_dir": self.output_dir,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "completed_dates": self.completed_dates,
+            "failed_dates": self.failed_dates,
+            "kwargs": self.kwargs,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "Checkpoint":
+        return cls(**data)
+
+    def save(self, path: Path) -> None:
+        """Save checkpoint to JSON file."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @classmethod
+    def load(cls, path: Path) -> "Checkpoint":
+        """Load checkpoint from JSON file."""
+        with open(path) as f:
+            return cls.from_dict(json.load(f))
+
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+
+def configure_logging(
+    verbose: bool = False,
+    log_file: Optional[Path] = None,
+    quiet: bool = False,
+) -> None:
+    """
+    Configure logging for the pipeline.
+
+    Parameters
+    ----------
+    verbose : bool
+        Enable debug-level logging
+    log_file : Path, optional
+        Write logs to file in addition to console
+    quiet : bool
+        Suppress all console output except errors
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    if quiet:
+        level = logging.ERROR
+
+    handlers = []
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    console_format = logging.Formatter(
+        "%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%H:%M:%S"
+    )
+    console_handler.setFormatter(console_format)
+    handlers.append(console_handler)
+
+    # File handler (if specified)
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.DEBUG)  # Always verbose in file
+        file_format = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+        file_handler.setFormatter(file_format)
+        handlers.append(file_handler)
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    # Remove existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Add new handlers
+    for handler in handlers:
+        root_logger.addHandler(handler)
+
+
+# =============================================================================
+# LAZ File Loading with Error Handling
+# =============================================================================
+
+def load_laz_points(
+    path: Path,
+    validate: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Read a .laz file using laspy and return points, intensities, and GPS times.
-    """
-    import laspy
 
-    with laspy.open(path) as f:
-        hdr = f.header
-        pts = f.read()
-    xyz = np.vstack((pts.X * hdr.scale[0] + hdr.offset[0],
-                     pts.Y * hdr.scale[1] + hdr.offset[1],
-                     pts.Z * hdr.scale[2] + hdr.offset[2])).T.astype(float)
-    intensity = np.asarray(pts.intensity, dtype=float)
-    if hasattr(pts, "gps_time"):
-        gps_time = np.asarray(pts.gps_time, dtype=float)
-    else:
-        gps_time = np.arange(len(xyz), dtype=float)
+    Parameters
+    ----------
+    path : Path
+        Path to LAZ file
+    validate : bool
+        Perform basic validation on loaded data
+
+    Returns
+    -------
+    xyz : ndarray (N, 3)
+        Point coordinates
+    intensity : ndarray (N,)
+        Intensity values
+    gps_time : ndarray (N,)
+        GPS timestamps
+
+    Raises
+    ------
+    CorruptFileError
+        If file cannot be read or contains invalid data
+    """
+    try:
+        import laspy
+    except ImportError:
+        raise LidarProcessingError(
+            "laspy is required for LAZ file reading. "
+            "Install with: pip install laspy"
+        )
+
+    try:
+        with laspy.open(path) as f:
+            hdr = f.header
+            pts = f.read()
+    except Exception as e:
+        raise CorruptFileError(path, str(e))
+
+    try:
+        xyz = np.vstack((
+            pts.X * hdr.scale[0] + hdr.offset[0],
+            pts.Y * hdr.scale[1] + hdr.offset[1],
+            pts.Z * hdr.scale[2] + hdr.offset[2]
+        )).T.astype(float)
+
+        intensity = np.asarray(pts.intensity, dtype=float)
+
+        if hasattr(pts, "gps_time"):
+            gps_time = np.asarray(pts.gps_time, dtype=float)
+        else:
+            gps_time = np.arange(len(xyz), dtype=float)
+
+    except Exception as e:
+        raise CorruptFileError(path, f"Failed to extract point data: {e}")
+
+    # Validation
+    if validate:
+        if len(xyz) == 0:
+            raise CorruptFileError(path, "File contains no points")
+
+        if np.any(np.isnan(xyz)) or np.any(np.isinf(xyz)):
+            n_invalid = np.sum(np.isnan(xyz) | np.isinf(xyz))
+            logger.warning(
+                "File %s contains %d invalid coordinates (NaN/Inf)",
+                path.name, n_invalid
+            )
+            # Filter out invalid points
+            valid_mask = ~(np.any(np.isnan(xyz), axis=1) | np.any(np.isinf(xyz), axis=1))
+            xyz = xyz[valid_mask]
+            intensity = intensity[valid_mask]
+            gps_time = gps_time[valid_mask]
+
+            if len(xyz) == 0:
+                raise CorruptFileError(path, "All points have invalid coordinates")
+
     return xyz, intensity, gps_time
+
+
+def load_laz_points_safe(
+    path: Path,
+    validate: bool = True,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """
+    Safely load LAZ file, returning None on failure.
+
+    Use this for batch processing where individual file failures
+    should not stop the entire process.
+    """
+    try:
+        return load_laz_points(path, validate=validate)
+    except CorruptFileError as e:
+        logger.error("Skipping corrupt file: %s", e)
+        return None
+    except Exception as e:
+        logger.error("Unexpected error loading %s: %s", path, e)
+        return None
 
 
 def process_l1(
@@ -69,6 +340,9 @@ def process_l1(
     residual_filter_passes: Optional[List[Tuple[float, float]]] = None,
     extract_profiles: bool = False,
     profile_config: Optional[profiles.TransectConfig] = None,
+    show_progress: bool = False,
+    skip_corrupt: bool = True,
+    max_files: Optional[int] = None,
 ) -> L1Result:
     """
     Orchestrate L1 processing: discover files -> load -> transform/filter ->
@@ -104,53 +378,119 @@ def process_l1(
         Extract 1D cross-shore profiles (default False)
     profile_config : TransectConfig, optional
         Configuration for profile extraction
+    show_progress : bool
+        Show progress bar (default False)
+    skip_corrupt : bool
+        Skip corrupt files instead of raising error (default True)
 
     Returns
     -------
     L1Result
         Contains xarray.Dataset and optional profile results
+
+    Raises
+    ------
+    FileNotFoundError
+        If no matching LAZ files found
+    NoDataError
+        If all files are filtered out
+    CorruptFileError
+        If skip_corrupt=False and a corrupt file is encountered
     """
-    cfg = phase1.load_config(config_path)
+    try:
+        cfg = phase1.load_config(config_path)
+    except Exception as e:
+        raise ConfigurationError(f"Failed to load config from {config_path}: {e}")
+
     if data_folder_override is not None:
         cfg = replace(cfg, data_folder=Path(data_folder_override))
+
+    if not cfg.data_folder.exists():
+        raise ConfigurationError(f"Data folder does not exist: {cfg.data_folder}")
+
     laz_files = phase1.discover_laz_files(cfg.data_folder, start=start, end=end)
     if not laz_files:
-        raise FileNotFoundError("No matching .laz files found")
+        date_range = ""
+        if start or end:
+            date_range = f" in range {start} to {end}"
+        raise FileNotFoundError(f"No matching .laz files found in {cfg.data_folder}{date_range}")
+
+    # Limit number of files for testing
+    if max_files is not None and max_files > 0:
+        laz_files = laz_files[:max_files]
+        logger.info("Limited to %d files (--n flag)", max_files)
+
+    logger.info("Found %d LAZ files to process", len(laz_files))
 
     load_fn = loader or load_laz_points
     batches = []
-    for path, ts in laz_files:
-        logger.info("Loading %s", path.name)
-        points, intensities, gps_times = load_fn(path)
-        f_points, f_intensity, f_times = phase1.prepare_batch(
-            points,
-            intensities,
-            gps_times,
-            cfg,
-            intensity_threshold=intensity_threshold,
-            max_seconds=max_seconds,
-        )
+    corrupt_files = []
+
+    # Process files with optional progress bar
+    file_iter = laz_files
+    if show_progress and TQDM_AVAILABLE:
+        file_iter = tqdm(laz_files, desc="Loading files", unit="file")
+
+    for path, ts in file_iter:
+        logger.debug("Loading %s", path.name)
+
+        # Load with error handling
+        try:
+            if loader is not None:
+                points, intensities, gps_times = loader(path)
+            else:
+                points, intensities, gps_times = load_laz_points(path, validate=True)
+        except CorruptFileError as e:
+            if skip_corrupt:
+                logger.warning("Skipping corrupt file: %s", path.name)
+                corrupt_files.append((path, str(e)))
+                continue
+            else:
+                raise
+
+        try:
+            f_points, f_intensity, f_times = phase1.prepare_batch(
+                points,
+                intensities,
+                gps_times,
+                cfg,
+                intensity_threshold=intensity_threshold,
+                max_seconds=max_seconds,
+            )
+        except Exception as e:
+            logger.warning("Failed to prepare batch for %s: %s", path.name, e)
+            continue
+
         if len(f_points) == 0:
-            logger.warning("No points after filtering for file %s", path)
+            logger.debug("No points after filtering for file %s", path)
             continue
 
         # Apply two-stage residual kernel filtering
         if apply_residual_filter and len(f_points) > 100:
-            logger.info("Applying residual filter to %d points", len(f_points))
-            f_points = phase2.residual_kernel_filter_two_stage(
-                f_points,
-                passes=residual_filter_passes,
-            )
-            logger.info("After filtering: %d points", len(f_points))
+            logger.debug("Applying residual filter to %d points", len(f_points))
+            try:
+                f_points = phase2.residual_kernel_filter_two_stage(
+                    f_points,
+                    passes=residual_filter_passes,
+                )
+            except Exception as e:
+                logger.warning("Residual filtering failed for %s: %s", path.name, e)
+                # Continue with unfiltered points
+            logger.debug("After filtering: %d points", len(f_points))
 
         if len(f_points) == 0:
-            logger.warning("No points after residual filtering for file %s", path)
+            logger.debug("No points after residual filtering for file %s", path)
             continue
 
         batches.append((f_points, ts))
 
+    if corrupt_files:
+        logger.warning("Skipped %d corrupt files", len(corrupt_files))
+
     if not batches:
-        raise RuntimeError("All files filtered out; no grids produced")
+        raise NoDataError("All files filtered out; no grids produced")
+
+    logger.info("Processing %d valid batches", len(batches))
 
     # Use common bin edges across all batches so datasets align
     x_min = min(np.min(b[0][:, 0]) for b in batches)
@@ -169,8 +509,13 @@ def process_l1(
     x_edges = phase2.bin_edges(np.array([x_min, x_max]), bin_size)
     y_edges = phase2.bin_edges(np.array([y_min, y_max]), bin_size)
 
+    # Bin with optional progress bar
     grids = []
-    for f_points, ts in batches:
+    batch_iter = batches
+    if show_progress and TQDM_AVAILABLE:
+        batch_iter = tqdm(batches, desc="Binning", unit="batch")
+
+    for f_points, ts in batch_iter:
         grid = phase2.bin_point_cloud(
             f_points, bin_size=bin_size, mode_bin=mode_bin, x_edges=x_edges, y_edges=y_edges
         )
@@ -181,6 +526,7 @@ def process_l1(
     # Extract profiles if requested
     profile_result = None
     if extract_profiles:
+        logger.info("Extracting profiles")
         # Combine all points for profile extraction
         all_points = np.vstack([b[0] for b in batches])
         X, Y, Z = all_points[:, 0], all_points[:, 1], all_points[:, 2]
@@ -215,6 +561,9 @@ def process_l2(
     extract_intensity_contours: bool = False,
     intensity_contour_thresholds: Optional[List[float]] = None,
     multi_transect: bool = False,
+    show_progress: bool = False,
+    skip_corrupt: bool = True,
+    max_files: Optional[int] = None,
 ) -> phase3.TimeResolvedDataset:
     """
     Orchestrate L2 processing: produces time-resolved Z(x,t) matrices for wave analysis.
@@ -265,6 +614,10 @@ def process_l2(
     multi_transect : bool
         Extract multiple transects at all alongshore offsets in profile_config
         (default False = single central transect only)
+    show_progress : bool
+        Show progress bar (default False)
+    skip_corrupt : bool
+        Skip corrupt files instead of raising error (default True)
 
     Returns
     -------
@@ -275,13 +628,24 @@ def process_l2(
         # L2 uses less aggressive filtering
         residual_filter_passes = [(2.0, 0.5)]
 
-    cfg = phase1.load_config(config_path)
+    try:
+        cfg = phase1.load_config(config_path)
+    except Exception as e:
+        raise ConfigurationError(f"Failed to load config from {config_path}: {e}")
+
     if data_folder_override is not None:
         cfg = replace(cfg, data_folder=Path(data_folder_override))
 
     laz_files = phase1.discover_laz_files(cfg.data_folder, start=start, end=end)
     if not laz_files:
         raise FileNotFoundError("No matching .laz files found")
+
+    # Limit number of files for testing
+    if max_files is not None and max_files > 0:
+        laz_files = laz_files[:max_files]
+        logger.info("Limited to %d files (--n flag)", max_files)
+
+    logger.info("Found %d LAZ files for L2 processing", len(laz_files))
 
     load_fn = loader or load_laz_points
 
@@ -290,9 +654,27 @@ def process_l2(
     all_times = []
     base_time = None
 
-    for path, ts in laz_files:
-        logger.info("Loading %s for L2", path.name)
-        points, intensities, gps_times = load_fn(path)
+    # Process files with optional progress bar
+    file_iter = laz_files
+    if show_progress and TQDM_AVAILABLE:
+        file_iter = tqdm(laz_files, desc="Loading L2 files", unit="file")
+
+    for path, ts in file_iter:
+        logger.debug("Loading %s for L2", path.name)
+
+        # Load with error handling
+        try:
+            if loader is not None:
+                points, intensities, gps_times = loader(path)
+            else:
+                points, intensities, gps_times = load_laz_points(path, validate=True)
+        except CorruptFileError as e:
+            if skip_corrupt:
+                logger.warning("Skipping corrupt file: %s", path.name)
+                continue
+            else:
+                raise
+
         f_points, f_intensity, f_times = phase1.prepare_batch(
             points,
             intensities,
@@ -473,10 +855,17 @@ def process_l1_batch(
     start: datetime,
     end: datetime,
     output_dir: Path,
+    checkpoint_file: Optional[Path] = None,
+    resume: bool = False,
+    show_progress: bool = True,
+    parallel: bool = False,
+    max_workers: int = 4,
     **kwargs,
-) -> List[Path]:
+) -> BatchProgress:
     """
     Process L1 data in daily batches, saving each day to a separate file.
+
+    Supports resumable processing via checkpoints.
 
     Parameters
     ----------
@@ -486,43 +875,405 @@ def process_l1_batch(
         Date range to process
     output_dir : Path
         Directory for output NetCDF files
+    checkpoint_file : Path, optional
+        Path to save/load checkpoint file. If None, uses output_dir/checkpoint.json
+    resume : bool
+        Resume from checkpoint if it exists (default False)
+    show_progress : bool
+        Show progress bar (default True)
+    parallel : bool
+        Use parallel processing (default False, experimental)
+    max_workers : int
+        Maximum parallel workers (default 4)
     **kwargs
         Additional arguments passed to process_l1()
 
     Returns
     -------
-    list of Path
-        Paths to saved NetCDF files
+    BatchProgress
+        Progress information including success/failure counts
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    saved_files = []
-    current = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    if checkpoint_file is None:
+        checkpoint_file = output_dir / "checkpoint.json"
 
+    # Generate list of dates to process
+    dates_to_process = []
+    current = start.replace(hour=0, minute=0, second=0, microsecond=0)
     while current < end:
-        day_end = current + timedelta(days=1)
-        logger.info("Processing %s", current.strftime("%Y-%m-%d"))
+        dates_to_process.append(current)
+        current += timedelta(days=1)
+
+    # Handle resume from checkpoint
+    completed_dates = set()
+    failed_dates = set()
+
+    if resume and checkpoint_file.exists():
+        try:
+            checkpoint = Checkpoint.load(checkpoint_file)
+            completed_dates = set(checkpoint.completed_dates)
+            failed_dates = set(checkpoint.failed_dates)
+            logger.info(
+                "Resuming from checkpoint: %d completed, %d failed",
+                len(completed_dates), len(failed_dates)
+            )
+        except Exception as e:
+            logger.warning("Failed to load checkpoint: %s", e)
+
+    # Filter out already completed dates
+    remaining_dates = [
+        d for d in dates_to_process
+        if d.strftime("%Y-%m-%d") not in completed_dates
+    ]
+
+    progress = BatchProgress(total_items=len(dates_to_process))
+    progress.completed = len(completed_dates)
+    progress.skipped = len(failed_dates)
+
+    if not remaining_dates:
+        logger.info("All dates already processed")
+        return progress
+
+    logger.info("Processing %d days (%d already completed)", len(remaining_dates), len(completed_dates))
+
+    # Process dates
+    date_iter = remaining_dates
+    if show_progress and TQDM_AVAILABLE:
+        date_iter = tqdm(remaining_dates, desc="Processing days", unit="day")
+
+    def process_single_date(date: datetime) -> Tuple[datetime, Optional[Path], Optional[str]]:
+        """Process a single date, returning (date, output_path, error_msg)."""
+        day_end = date + timedelta(days=1)
+        date_str = date.strftime("%Y-%m-%d")
 
         try:
             result = process_l1(
                 config_path,
-                start=current,
+                start=date,
                 end=min(day_end, end),
                 **kwargs,
             )
 
-            output_path = output_dir / f"L1_{current.strftime('%Y%m%d')}.nc"
+            output_path = output_dir / f"L1_{date.strftime('%Y%m%d')}.nc"
             save_dataset(result.dataset, output_path)
-            saved_files.append(output_path)
-            logger.info("Saved %s", output_path)
+            return (date, output_path, None)
 
-        except (FileNotFoundError, RuntimeError) as e:
-            logger.warning("No data for %s: %s", current.strftime("%Y-%m-%d"), e)
+        except (FileNotFoundError, NoDataError) as e:
+            return (date, None, f"No data: {e}")
+        except Exception as e:
+            return (date, None, f"Error: {e}")
 
-        current = day_end
+    if parallel and len(remaining_dates) > 1:
+        # Parallel processing (experimental)
+        logger.info("Using parallel processing with %d workers", max_workers)
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(process_single_date, d): d for d in remaining_dates}
+            for future in as_completed(futures):
+                date, output_path, error = future.result()
+                date_str = date.strftime("%Y-%m-%d")
 
-    return saved_files
+                if output_path:
+                    progress.completed += 1
+                    completed_dates.add(date_str)
+                    logger.info("Completed %s", date_str)
+                else:
+                    progress.failed += 1
+                    failed_dates.add(date_str)
+                    progress.errors.append((date_str, error or "Unknown error"))
+                    logger.warning("Failed %s: %s", date_str, error)
+    else:
+        # Sequential processing
+        for date in date_iter:
+            date_str = date.strftime("%Y-%m-%d")
+            progress.current_item = date_str
+
+            date, output_path, error = process_single_date(date)
+
+            if output_path:
+                progress.completed += 1
+                completed_dates.add(date_str)
+                logger.debug("Completed %s", date_str)
+            else:
+                progress.failed += 1
+                failed_dates.add(date_str)
+                progress.errors.append((date_str, error or "Unknown error"))
+                logger.debug("Failed %s: %s", date_str, error)
+
+            # Save checkpoint periodically
+            if (progress.completed + progress.failed) % 5 == 0:
+                checkpoint = Checkpoint(
+                    config_path=str(config_path),
+                    output_dir=str(output_dir),
+                    start_date=start.isoformat(),
+                    end_date=end.isoformat(),
+                    completed_dates=list(completed_dates),
+                    failed_dates=list(failed_dates),
+                    kwargs={k: str(v) if isinstance(v, Path) else v for k, v in kwargs.items()},
+                )
+                checkpoint.save(checkpoint_file)
+
+    # Final checkpoint save
+    checkpoint = Checkpoint(
+        config_path=str(config_path),
+        output_dir=str(output_dir),
+        start_date=start.isoformat(),
+        end_date=end.isoformat(),
+        completed_dates=list(completed_dates),
+        failed_dates=list(failed_dates),
+        kwargs={k: str(v) if isinstance(v, Path) else v for k, v in kwargs.items()},
+    )
+    checkpoint.save(checkpoint_file)
+
+    logger.info(
+        "Batch complete: %d succeeded, %d failed, %.1f%% success rate",
+        progress.completed, progress.failed, progress.success_rate * 100
+    )
+
+    return progress
+
+
+def process_l2_batch(
+    config_path: Path,
+    start: datetime,
+    end: datetime,
+    output_dir: Path,
+    file_duration: timedelta = timedelta(minutes=30),
+    checkpoint_file: Optional[Path] = None,
+    resume: bool = False,
+    show_progress: bool = True,
+    **kwargs,
+) -> BatchProgress:
+    """
+    Process L2 data in time-window batches, saving each window to a separate file.
+
+    Parameters
+    ----------
+    config_path : Path
+        Path to config JSON
+    start, end : datetime
+        Date range to process
+    output_dir : Path
+        Directory for output NetCDF files
+    file_duration : timedelta
+        Duration of each output file (default 30 minutes)
+    checkpoint_file : Path, optional
+        Path to save/load checkpoint file
+    resume : bool
+        Resume from checkpoint if it exists (default False)
+    show_progress : bool
+        Show progress bar (default True)
+    **kwargs
+        Additional arguments passed to process_l2()
+
+    Returns
+    -------
+    BatchProgress
+        Progress information including success/failure counts
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if checkpoint_file is None:
+        checkpoint_file = output_dir / "l2_checkpoint.json"
+
+    # Generate list of time windows to process
+    windows_to_process = []
+    current = start
+    while current < end:
+        window_end = min(current + file_duration, end)
+        windows_to_process.append((current, window_end))
+        current = window_end
+
+    # Handle resume from checkpoint
+    completed_windows = set()
+    failed_windows = set()
+
+    if resume and checkpoint_file.exists():
+        try:
+            checkpoint = Checkpoint.load(checkpoint_file)
+            completed_windows = set(checkpoint.completed_dates)
+            failed_windows = set(checkpoint.failed_dates)
+            logger.info(
+                "Resuming L2 from checkpoint: %d completed, %d failed",
+                len(completed_windows), len(failed_windows)
+            )
+        except Exception as e:
+            logger.warning("Failed to load checkpoint: %s", e)
+
+    # Filter out already completed windows
+    remaining_windows = [
+        (s, e) for s, e in windows_to_process
+        if s.isoformat() not in completed_windows
+    ]
+
+    progress = BatchProgress(total_items=len(windows_to_process))
+    progress.completed = len(completed_windows)
+    progress.skipped = len(failed_windows)
+
+    if not remaining_windows:
+        logger.info("All L2 windows already processed")
+        return progress
+
+    logger.info(
+        "Processing %d L2 windows (%d already completed)",
+        len(remaining_windows), len(completed_windows)
+    )
+
+    # Process windows
+    window_iter = remaining_windows
+    if show_progress and TQDM_AVAILABLE:
+        window_iter = tqdm(remaining_windows, desc="Processing L2 windows", unit="window")
+
+    for window_start, window_end in window_iter:
+        window_key = window_start.isoformat()
+        progress.current_item = window_key
+
+        try:
+            result = process_l2(
+                config_path,
+                start=window_start,
+                end=window_end,
+                **kwargs,
+            )
+
+            # Generate filename
+            filename = f"L2_{window_start.strftime('%Y%m%d_%H%M')}.nc"
+            output_path = output_dir / filename
+            result.to_netcdf(output_path)
+
+            progress.completed += 1
+            completed_windows.add(window_key)
+            logger.debug("Completed L2 %s", window_key)
+
+        except (FileNotFoundError, NoDataError) as e:
+            progress.failed += 1
+            failed_windows.add(window_key)
+            progress.errors.append((window_key, f"No data: {e}"))
+            logger.debug("No data for L2 %s: %s", window_key, e)
+
+        except Exception as e:
+            progress.failed += 1
+            failed_windows.add(window_key)
+            progress.errors.append((window_key, f"Error: {e}"))
+            logger.warning("Error processing L2 %s: %s", window_key, e)
+
+        # Save checkpoint periodically
+        if (progress.completed + progress.failed) % 10 == 0:
+            checkpoint = Checkpoint(
+                config_path=str(config_path),
+                output_dir=str(output_dir),
+                start_date=start.isoformat(),
+                end_date=end.isoformat(),
+                completed_dates=list(completed_windows),
+                failed_dates=list(failed_windows),
+                kwargs={k: str(v) if isinstance(v, Path) else v for k, v in kwargs.items()},
+            )
+            checkpoint.save(checkpoint_file)
+
+    # Final checkpoint save
+    checkpoint = Checkpoint(
+        config_path=str(config_path),
+        output_dir=str(output_dir),
+        start_date=start.isoformat(),
+        end_date=end.isoformat(),
+        completed_dates=list(completed_windows),
+        failed_dates=list(failed_windows),
+        kwargs={k: str(v) if isinstance(v, Path) else v for k, v in kwargs.items()},
+    )
+    checkpoint.save(checkpoint_file)
+
+    logger.info(
+        "L2 batch complete: %d succeeded, %d failed, %.1f%% success rate",
+        progress.completed, progress.failed, progress.success_rate * 100
+    )
+
+    return progress
+
+
+# =============================================================================
+# Memory Management Utilities
+# =============================================================================
+
+def clear_memory() -> None:
+    """
+    Attempt to free memory by running garbage collection.
+    Useful between large batch processing steps.
+    """
+    import gc
+    gc.collect()
+
+
+def estimate_memory_usage(points: np.ndarray) -> float:
+    """
+    Estimate memory usage in MB for a point cloud array.
+
+    Parameters
+    ----------
+    points : ndarray
+        Point cloud array
+
+    Returns
+    -------
+    float
+        Estimated memory in MB
+    """
+    return points.nbytes / (1024 * 1024)
+
+
+def chunked_file_iterator(
+    laz_files: List[Tuple[Path, datetime]],
+    max_memory_mb: float = 1000.0,
+    loader: Optional[LoaderFn] = None,
+) -> Iterator[Tuple[List[Tuple[Path, datetime]], bool]]:
+    """
+    Iterate over LAZ files in memory-efficient chunks.
+
+    Yields groups of files that should fit within memory limit.
+    This is an estimate based on file sizes.
+
+    Parameters
+    ----------
+    laz_files : list
+        List of (path, timestamp) tuples
+    max_memory_mb : float
+        Maximum memory target per chunk in MB
+    loader : callable, optional
+        Custom loader to get file info
+
+    Yields
+    ------
+    chunk : list
+        Group of (path, timestamp) tuples
+    is_last : bool
+        True if this is the last chunk
+    """
+    chunk = []
+    estimated_mb = 0.0
+
+    # Rough estimate: 1MB of LAZ file ≈ 50MB in memory (uncompressed)
+    COMPRESSION_RATIO = 50.0
+
+    for i, (path, ts) in enumerate(laz_files):
+        try:
+            file_size_mb = path.stat().st_size / (1024 * 1024)
+            estimated_memory = file_size_mb * COMPRESSION_RATIO
+        except OSError:
+            estimated_memory = 50.0  # Default estimate
+
+        if chunk and estimated_mb + estimated_memory > max_memory_mb:
+            # Yield current chunk and start new one
+            yield chunk, False
+            chunk = []
+            estimated_mb = 0.0
+            clear_memory()
+
+        chunk.append((path, ts))
+        estimated_mb += estimated_memory
+
+    if chunk:
+        yield chunk, True
 
 
 def save_dataset(ds: phase3.xr.Dataset, output_path: Path) -> None:
@@ -594,90 +1345,181 @@ def main():
     parser = argparse.ArgumentParser(
         description="Lidar point cloud processing pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Process single L1 dataset
+  python phase4.py l1 config.json -o output.nc --start 2024-06-15 --end 2024-06-16
+
+  # Process L2 wave data
+  python phase4.py l2 config.json -o l2_output.nc --start 2024-06-15T10:00 --end 2024-06-15T10:30
+
+  # Batch process L1 with resume capability
+  python phase4.py batch config.json -o ./output/ --start 2024-06-01 --end 2024-06-30 --resume
+
+  # Batch process L2
+  python phase4.py batch-l2 config.json -o ./l2_output/ --start 2024-06-15 --end 2024-06-16
+        """,
     )
+
+    # Global arguments
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress non-error output")
+    parser.add_argument("--log-file", type=Path, help="Write logs to file")
+    parser.add_argument("--no-progress", action="store_true", help="Disable progress bars")
+
     subparsers = parser.add_subparsers(dest="command", help="Processing command")
 
     # L1 command
     l1_parser = subparsers.add_parser("l1", help="Process L1 (hourly beach surface)")
     l1_parser.add_argument("config", type=Path, help="Path to config JSON")
     l1_parser.add_argument("-o", "--output", type=Path, required=True, help="Output NetCDF path")
-    l1_parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
-    l1_parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")
-    l1_parser.add_argument("--bin-size", type=float, default=0.1, help="Spatial bin size (m)")
+    l1_parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD or ISO format)")
+    l1_parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD or ISO format)")
+    l1_parser.add_argument("--bin-size", type=float, default=0.1, help="Spatial bin size in meters (default: 0.1)")
     l1_parser.add_argument("--no-filter", action="store_true", help="Skip residual filtering")
-    l1_parser.add_argument("--data-folder", type=Path, help="Override data folder")
+    l1_parser.add_argument("--data-folder", type=Path, help="Override data folder from config")
+    l1_parser.add_argument("--skip-corrupt", action="store_true", default=True, help="Skip corrupt files (default: True)")
+    l1_parser.add_argument("-n", type=int, help="Limit to first N files (for testing)")
 
     # L2 command
     l2_parser = subparsers.add_parser("l2", help="Process L2 (wave-resolving)")
     l2_parser.add_argument("config", type=Path, help="Path to config JSON")
     l2_parser.add_argument("-o", "--output", type=Path, required=True, help="Output NetCDF path")
-    l2_parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
-    l2_parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")
-    l2_parser.add_argument("--time-bin", type=float, default=0.5, help="Time bin size (s)")
-    l2_parser.add_argument("--data-folder", type=Path, help="Override data folder")
+    l2_parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD or ISO format)")
+    l2_parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD or ISO format)")
+    l2_parser.add_argument("--time-bin", type=float, default=0.5, help="Time bin size in seconds (default: 0.5)")
+    l2_parser.add_argument("--x-bin", type=float, default=0.1, help="Spatial bin size in meters (default: 0.1)")
+    l2_parser.add_argument("--data-folder", type=Path, help="Override data folder from config")
+    l2_parser.add_argument("--no-outlier-detection", action="store_true", help="Skip 2D outlier detection")
+    l2_parser.add_argument("--multi-transect", action="store_true", help="Extract multiple transects")
+    l2_parser.add_argument("-n", type=int, help="Limit to first N files (for testing)")
 
-    # Batch command
+    # Batch L1 command
     batch_parser = subparsers.add_parser("batch", help="Batch process L1 by day")
     batch_parser.add_argument("config", type=Path, help="Path to config JSON")
     batch_parser.add_argument("-o", "--output-dir", type=Path, required=True, help="Output directory")
     batch_parser.add_argument("--start", type=str, required=True, help="Start date (YYYY-MM-DD)")
     batch_parser.add_argument("--end", type=str, required=True, help="End date (YYYY-MM-DD)")
-    batch_parser.add_argument("--data-folder", type=Path, help="Override data folder")
+    batch_parser.add_argument("--data-folder", type=Path, help="Override data folder from config")
+    batch_parser.add_argument("--resume", action="store_true", help="Resume from checkpoint if available")
+    batch_parser.add_argument("--parallel", action="store_true", help="Use parallel processing (experimental)")
+    batch_parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers (default: 4)")
+
+    # Batch L2 command
+    batch_l2_parser = subparsers.add_parser("batch-l2", help="Batch process L2 by time window")
+    batch_l2_parser.add_argument("config", type=Path, help="Path to config JSON")
+    batch_l2_parser.add_argument("-o", "--output-dir", type=Path, required=True, help="Output directory")
+    batch_l2_parser.add_argument("--start", type=str, required=True, help="Start datetime (YYYY-MM-DD or ISO)")
+    batch_l2_parser.add_argument("--end", type=str, required=True, help="End datetime (YYYY-MM-DD or ISO)")
+    batch_l2_parser.add_argument("--window", type=int, default=30, help="Window duration in minutes (default: 30)")
+    batch_l2_parser.add_argument("--data-folder", type=Path, help="Override data folder from config")
+    batch_l2_parser.add_argument("--resume", action="store_true", help="Resume from checkpoint if available")
 
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
+    # Configure logging
+    configure_logging(
+        verbose=args.verbose,
+        log_file=args.log_file,
+        quiet=args.quiet,
     )
 
-    if args.command == "l1":
-        start = datetime.fromisoformat(args.start) if args.start else None
-        end = datetime.fromisoformat(args.end) if args.end else None
+    show_progress = not args.no_progress
 
-        result = process_l1(
-            args.config,
-            start=start,
-            end=end,
-            bin_size=args.bin_size,
-            apply_residual_filter=not args.no_filter,
-            data_folder_override=args.data_folder,
-        )
-        save_dataset(result.dataset, args.output)
-        print(f"Saved L1 dataset to {args.output}")
+    try:
+        if args.command == "l1":
+            start = datetime.fromisoformat(args.start) if args.start else None
+            end = datetime.fromisoformat(args.end) if args.end else None
 
-    elif args.command == "l2":
-        start = datetime.fromisoformat(args.start) if args.start else None
-        end = datetime.fromisoformat(args.end) if args.end else None
+            result = process_l1(
+                args.config,
+                start=start,
+                end=end,
+                bin_size=args.bin_size,
+                apply_residual_filter=not args.no_filter,
+                data_folder_override=args.data_folder,
+                show_progress=show_progress,
+                skip_corrupt=args.skip_corrupt,
+                max_files=args.n,
+            )
+            save_dataset(result.dataset, args.output)
+            print(f"Saved L1 dataset to {args.output}")
 
-        result = process_l2(
-            args.config,
-            start=start,
-            end=end,
-            time_bin_size=args.time_bin,
-            data_folder_override=args.data_folder,
-        )
-        # Save L2 result
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        result.to_netcdf(output_path)
-        print(f"Saved L2 dataset to {args.output}")
+        elif args.command == "l2":
+            start = datetime.fromisoformat(args.start) if args.start else None
+            end = datetime.fromisoformat(args.end) if args.end else None
 
-    elif args.command == "batch":
-        start = datetime.fromisoformat(args.start)
-        end = datetime.fromisoformat(args.end)
+            result = process_l2(
+                args.config,
+                start=start,
+                end=end,
+                time_bin_size=args.time_bin,
+                x_bin_size=args.x_bin,
+                data_folder_override=args.data_folder,
+                apply_outlier_detection=not args.no_outlier_detection,
+                multi_transect=args.multi_transect,
+                show_progress=show_progress,
+                max_files=args.n,
+            )
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            result.to_netcdf(output_path)
+            print(f"Saved L2 dataset to {args.output}")
 
-        saved = process_l1_batch(
-            args.config,
-            start=start,
-            end=end,
-            output_dir=args.output_dir,
-            data_folder_override=args.data_folder,
-        )
-        print(f"Processed {len(saved)} days")
+        elif args.command == "batch":
+            start = datetime.fromisoformat(args.start)
+            end = datetime.fromisoformat(args.end)
 
-    else:
-        parser.print_help()
+            progress = process_l1_batch(
+                args.config,
+                start=start,
+                end=end,
+                output_dir=args.output_dir,
+                data_folder_override=args.data_folder,
+                resume=args.resume,
+                show_progress=show_progress,
+                parallel=args.parallel,
+                max_workers=args.workers,
+            )
+            print(f"Batch complete: {progress.completed} succeeded, {progress.failed} failed")
+            if progress.errors:
+                print(f"Errors:")
+                for date, error in progress.errors[:5]:
+                    print(f"  {date}: {error}")
+                if len(progress.errors) > 5:
+                    print(f"  ... and {len(progress.errors) - 5} more")
+
+        elif args.command == "batch-l2":
+            start = datetime.fromisoformat(args.start)
+            end = datetime.fromisoformat(args.end)
+
+            progress = process_l2_batch(
+                args.config,
+                start=start,
+                end=end,
+                output_dir=args.output_dir,
+                file_duration=timedelta(minutes=args.window),
+                data_folder_override=args.data_folder,
+                resume=args.resume,
+                show_progress=show_progress,
+            )
+            print(f"L2 batch complete: {progress.completed} succeeded, {progress.failed} failed")
+
+        else:
+            parser.print_help()
+            sys.exit(1)
+
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+        sys.exit(130)
+    except LidarProcessingError as e:
+        logger.error("Processing error: %s", e)
+        sys.exit(1)
+    except Exception as e:
+        logger.error("Unexpected error: %s", e)
+        if args.verbose:
+            traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
