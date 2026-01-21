@@ -27,7 +27,8 @@ def load_l1_dataset(path: Path) -> xr.Dataset:
 
 
 def calculate_slope(x: np.ndarray, z: np.ndarray,
-                    z_range: Optional[Tuple[float, float]] = None) -> Tuple[float, np.ndarray, np.ndarray]:
+                    z_range: Optional[Tuple[float, float]] = None,
+                    use_robust: bool = True) -> Tuple[float, np.ndarray, np.ndarray]:
     """
     Calculate foreshore slope using linear regression.
 
@@ -39,7 +40,10 @@ def calculate_slope(x: np.ndarray, z: np.ndarray,
         Elevation values (m)
     z_range : tuple, optional
         (z_min, z_max) elevation range to fit slope within.
-        If None, uses the middle 50% of the elevation range.
+        If None, uses the middle 60% of the elevation range.
+    use_robust : bool
+        If True, use Theil-Sen robust regression (median-based, outlier resistant).
+        If False, use ordinary least squares.
 
     Returns
     -------
@@ -50,6 +54,8 @@ def calculate_slope(x: np.ndarray, z: np.ndarray,
     z_fit : array
         Fitted Z values
     """
+    from scipy import stats
+
     # Remove NaN values
     valid = ~np.isnan(z)
     x_valid = x[valid]
@@ -60,12 +66,13 @@ def calculate_slope(x: np.ndarray, z: np.ndarray,
 
     # Determine elevation range for slope fitting
     if z_range is None:
-        z_min_data = np.nanmin(z_valid)
-        z_max_data = np.nanmax(z_valid)
-        z_range_span = z_max_data - z_min_data
-        # Focus on middle portion (typical swash/foreshore zone)
-        z_range = (z_min_data + 0.25 * z_range_span,
-                   z_min_data + 0.75 * z_range_span)
+        # Use percentiles to be robust to outliers when determining the range
+        z_p10 = np.percentile(z_valid, 10)
+        z_p90 = np.percentile(z_valid, 90)
+        z_range_span = z_p90 - z_p10
+        # Focus on middle 60% of the elevation range (20% to 80% of span)
+        z_range = (z_p10 + 0.20 * z_range_span,
+                   z_p10 + 0.80 * z_range_span)
 
     # Select points within the elevation range
     in_range = (z_valid >= z_range[0]) & (z_valid <= z_range[1])
@@ -80,13 +87,26 @@ def calculate_slope(x: np.ndarray, z: np.ndarray,
     if len(x_fit_pts) < 2:
         return np.nan, np.array([]), np.array([])
 
-    # Linear regression: z = slope * x + intercept
-    coeffs = np.polyfit(x_fit_pts, z_fit_pts, 1)
-    slope = coeffs[0]
+    # Sort by x for proper fitting
+    sort_idx = np.argsort(x_fit_pts)
+    x_fit_pts = x_fit_pts[sort_idx]
+    z_fit_pts = z_fit_pts[sort_idx]
 
-    # Generate fit line for plotting
+    # Regression
+    if use_robust and len(x_fit_pts) >= 10:
+        # Theil-Sen regression: median-based, resistant to up to 29% outliers
+        result = stats.theilslopes(z_fit_pts, x_fit_pts)
+        slope = result.slope
+        intercept = result.intercept
+    else:
+        # Ordinary least squares
+        coeffs = np.polyfit(x_fit_pts, z_fit_pts, 1)
+        slope = coeffs[0]
+        intercept = coeffs[1]
+
+    # Generate fit line for plotting (only within the fitted region)
     x_line = np.array([x_fit_pts.min(), x_fit_pts.max()])
-    z_line = np.polyval(coeffs, x_line)
+    z_line = slope * x_line + intercept
 
     return slope, x_line, z_line
 
