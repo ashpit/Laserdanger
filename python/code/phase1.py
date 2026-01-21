@@ -124,8 +124,28 @@ def transform_points(points: ArrayLike, tmatrix: ArrayLike) -> ArrayLike:
 
 def filter_by_polygon(points: ArrayLike, polygon: ArrayLike, eps: float = 1e-9) -> ArrayLike:
     """
-    Return boolean mask of points inside a polygon (ray casting), including edge points.
+    Return boolean mask of points inside a polygon, including edge points.
     points: (N,2); polygon: (M,2) closed or open.
+
+    Uses matplotlib.path.Path for optimized C-level point-in-polygon testing.
+    Falls back to pure Python implementation if matplotlib is not available.
+    """
+    try:
+        from matplotlib.path import Path
+        # Create path (matplotlib handles closing automatically)
+        path = Path(polygon)
+        # contains_points is highly optimized C code
+        # radius=eps includes points very close to edges
+        inside = path.contains_points(points, radius=eps)
+        return inside
+    except ImportError:
+        # Fallback to pure Python implementation
+        return _filter_by_polygon_python(points, polygon, eps)
+
+
+def _filter_by_polygon_python(points: ArrayLike, polygon: ArrayLike, eps: float = 1e-9) -> ArrayLike:
+    """
+    Pure Python fallback for point-in-polygon testing using ray casting.
     """
     x = points[:, 0]
     y = points[:, 1]

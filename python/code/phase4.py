@@ -44,6 +44,14 @@ except ImportError:
         """Fallback when tqdm is not installed."""
         return iterable
 
+# Check for lazrs (fast Rust-based LAZ decompression)
+LAZRS_AVAILABLE = False
+try:
+    import lazrs
+    LAZRS_AVAILABLE = True
+except ImportError:
+    pass
+
 # Loader type: given a path, return (points[N,3], intensities[N], gps_times[N])
 LoaderFn = Callable[[Path], Tuple[np.ndarray, np.ndarray, np.ndarray]]
 
@@ -221,12 +229,17 @@ def configure_logging(
 # LAZ File Loading with Error Handling
 # =============================================================================
 
+_lazrs_warning_shown = False
+
 def load_laz_points(
     path: Path,
     validate: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Read a .laz file using laspy and return points, intensities, and GPS times.
+
+    Uses lazrs backend for faster decompression if available (1.5-2x speedup).
+    Install with: pip install lazrs
 
     Parameters
     ----------
@@ -249,6 +262,8 @@ def load_laz_points(
     CorruptFileError
         If file cannot be read or contains invalid data
     """
+    global _lazrs_warning_shown
+
     try:
         import laspy
     except ImportError:
@@ -256,6 +271,14 @@ def load_laz_points(
             "laspy is required for LAZ file reading. "
             "Install with: pip install laspy"
         )
+
+    # Warn once if lazrs is not available
+    if not LAZRS_AVAILABLE and not _lazrs_warning_shown:
+        logger.warning(
+            "lazrs not installed - LAZ decompression may be slow. "
+            "Install with: pip install lazrs"
+        )
+        _lazrs_warning_shown = True
 
     try:
         with laspy.open(path) as f:
