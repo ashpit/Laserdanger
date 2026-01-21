@@ -156,7 +156,7 @@ def create_animation(ds: xr.Dataset, output_path: Path, fps: int = 2,
         profile = ds.elevation.isel(time=i, y=y_index).values
         profiles.append(profile)
 
-        slope, x_fit, z_fit = calculate_slope(x, profile)
+        slope, x_fit, z_fit = calculate_slope(x, profile, x_max_relative=x_max_relative)
         slopes.append(slope)
         fit_lines.append((x_fit, z_fit))
 
@@ -244,6 +244,46 @@ def create_animation(ds: xr.Dataset, output_path: Path, fps: int = 2,
         print(f'  Min slope:  {np.min(valid_slopes):.4f}')
         print(f'  Max slope:  {np.max(valid_slopes):.4f}')
 
+    return np.array(slopes), ds.time.values, y_pos, x_max_relative
+
+
+def save_slopes_to_nc(slopes: np.ndarray, times: np.ndarray, y_pos: float,
+                      x_max_relative: float, output_path: Path):
+    """Save slope timeseries to NetCDF file."""
+    # Convert slopes to angles
+    angles = np.degrees(np.arctan(slopes))
+
+    # Create xarray dataset
+    ds_out = xr.Dataset(
+        {
+            'slope': (['time'], slopes, {
+                'units': 'dimensionless',
+                'long_name': 'Foreshore slope (tan beta)',
+                'description': 'Beach foreshore slope dz/dx',
+            }),
+            'slope_angle': (['time'], angles, {
+                'units': 'degrees',
+                'long_name': 'Foreshore slope angle',
+                'description': 'Beach foreshore slope in degrees',
+            }),
+        },
+        coords={
+            'time': times,
+        },
+        attrs={
+            'title': 'L1 Beach Foreshore Slope Timeseries',
+            'description': 'Foreshore slopes calculated for Stockdon runup',
+            'y_position_m': y_pos,
+            'x_max_relative_m': x_max_relative,
+            'slope_method': 'Theil-Sen robust regression',
+            'created_by': 'animate_l1_slope.py',
+        }
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ds_out.to_netcdf(output_path)
+    print(f'Saved slopes to: {output_path}')
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -257,6 +297,12 @@ def main():
                         help="Frames per second (default: 2)")
     parser.add_argument("--y-index", type=int, default=None,
                         help="Y index for profile (default: middle)")
+    parser.add_argument("--x-max", type=float, default=20.0,
+                        help="Max cross-shore distance from seaward edge for slope fit in meters (default: 20)")
+    parser.add_argument("--save-nc", action="store_true",
+                        help="Save slopes to NetCDF file")
+    parser.add_argument("--nc-only", action="store_true",
+                        help="Only save NC file, skip GIF animation")
 
     args = parser.parse_args()
 
@@ -270,17 +316,51 @@ def main():
     else:
         output_dir = args.output
 
-    output_path = output_dir / "l1_profile_slope_animation.gif"
+    gif_path = output_dir / "l1_profile_slope_animation.gif"
+    nc_path = output_dir / "l1_slopes.nc"
 
     # Load data
     print(f"Loading: {args.input}")
     ds = load_l1_dataset(args.input)
 
     print(f"Dataset has {ds.sizes['time']} timesteps")
-    print(f"Creating animation at {args.fps} fps...")
+    print(f"Fitting slope using first {args.x_max}m from seaward edge (swash zone)")
 
-    # Create animation
-    create_animation(ds, output_path, fps=args.fps, y_index=args.y_index)
+    if args.nc_only:
+        # Calculate slopes without animation
+        x = ds.x.values
+        y_index = args.y_index if args.y_index is not None else len(ds.y) // 2
+        y_pos = float(ds.y[y_index])
+
+        slopes = []
+        for i in range(ds.sizes["time"]):
+            profile = ds.elevation.isel(time=i, y=y_index).values
+            slope, _, _ = calculate_slope(x, profile, x_max_relative=args.x_max)
+            slopes.append(slope)
+
+        slopes = np.array(slopes)
+        times = ds.time.values
+
+        # Print summary
+        valid_slopes = slopes[~np.isnan(slopes)]
+        if len(valid_slopes) > 0:
+            print(f'\nSlope Summary:')
+            print(f'  Mean slope: {np.mean(valid_slopes):.4f} ({np.degrees(np.arctan(np.mean(valid_slopes))):.2f}°)')
+            print(f'  Std slope:  {np.std(valid_slopes):.4f}')
+            print(f'  Min slope:  {np.min(valid_slopes):.4f}')
+            print(f'  Max slope:  {np.max(valid_slopes):.4f}')
+
+        save_slopes_to_nc(slopes, times, y_pos, args.x_max, nc_path)
+    else:
+        # Create animation (and optionally save NC)
+        print(f"Creating animation at {args.fps} fps...")
+        slopes, times, y_pos, x_max = create_animation(
+            ds, gif_path, fps=args.fps, y_index=args.y_index,
+            x_max_relative=args.x_max
+        )
+
+        if args.save_nc:
+            save_slopes_to_nc(slopes, times, y_pos, x_max, nc_path)
 
     ds.close()
     print("\nDone!")

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import platform
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,10 +27,32 @@ class Config:
     lidar_boundary: ArrayLike  # shape (N, 2)
 
 
+def _translate_path_for_os(path_str: str) -> Path:
+    """
+    Translate paths based on operating system.
+
+    Mac: /Volumes/<group>/... (unchanged)
+    Linux: /Volumes/<group>/... -> /project/<group>/...
+    """
+    system = platform.system()
+
+    if system == "Linux":
+        # On Linux, translate /Volumes/ to /project/
+        if path_str.startswith("/Volumes/"):
+            path_str = "/project/" + path_str[len("/Volumes/"):]
+    # On Darwin (macOS) or other systems, keep paths as-is
+
+    return Path(path_str)
+
+
 def load_config(path: Path) -> Config:
     """
     Load configuration from JSON and coerce to strong types.
     Required keys: dataFolder, processFolder, plotFolder, transformMatrix, LidarBoundary.
+
+    Paths are automatically translated based on operating system:
+    - macOS: /Volumes/<group>/... (as specified in config)
+    - Linux: /Volumes/<group>/... -> /project/<group>/...
     """
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
@@ -48,9 +71,9 @@ def load_config(path: Path) -> Config:
         raise ValueError("LidarBoundary must be Nx2 with at least 3 vertices")
 
     return Config(
-        data_folder=Path(raw["dataFolder"]),
-        process_folder=Path(raw["processFolder"]),
-        plot_folder=Path(raw["plotFolder"]),
+        data_folder=_translate_path_for_os(raw["dataFolder"]),
+        process_folder=_translate_path_for_os(raw["processFolder"]),
+        plot_folder=_translate_path_for_os(raw["plotFolder"]),
         transform_matrix=tmatrix,
         lidar_boundary=boundary,
     )
