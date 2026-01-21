@@ -26,6 +26,7 @@ def make_grid(z_value: float) -> phase2.BinnedGrid:
         z_mode=z,
         count=np.ones(shape),
         snr=np.full(shape, 10.0),
+        valid_mask=np.ones(shape, dtype=bool),
     )
 
 
@@ -64,6 +65,7 @@ def test_build_dataset_requires_matching_edges() -> None:
         z_mode=g2_grid.z_mode,
         count=g2_grid.count,
         snr=g2_grid.snr,
+        valid_mask=g2_grid.valid_mask,
     )
     g2 = phase3.GridWithTime(grid=g2_grid, timestamp=datetime.now(timezone.utc) + timedelta(minutes=5))
     with pytest.raises(ValueError):
