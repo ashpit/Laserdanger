@@ -38,7 +38,8 @@ def test_grid_to_dataset_shapes_and_coords() -> None:
     assert ds.sizes["x"] == 2 and ds.sizes["y"] == 2
     np.testing.assert_allclose(ds.coords["x"], [0.5, 1.5])
     np.testing.assert_allclose(ds.coords["y"], [0.5, 1.5])
-    np.testing.assert_allclose(ds["elevation"].sel(time=ts, method="nearest"), grid.z_mean.T)
+    # Use isel since timestamps are stored timezone-naive (UTC is noted in attrs)
+    np.testing.assert_allclose(ds["elevation"].isel(time=0), grid.z_mean.T)
 
 
 def test_build_dataset_stacks_time() -> None:

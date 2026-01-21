@@ -1361,16 +1361,17 @@ Examples:
         """,
     )
 
-    # Global arguments
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress non-error output")
-    parser.add_argument("--log-file", type=Path, help="Write logs to file")
-    parser.add_argument("--no-progress", action="store_true", help="Disable progress bars")
+    # Common arguments shared by all subcommands
+    common_parser = argparse.ArgumentParser(add_help=False)
+    common_parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    common_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress non-error output")
+    common_parser.add_argument("--log-file", type=Path, help="Write logs to file")
+    common_parser.add_argument("--no-progress", action="store_true", help="Disable progress bars")
 
     subparsers = parser.add_subparsers(dest="command", help="Processing command")
 
     # L1 command
-    l1_parser = subparsers.add_parser("l1", help="Process L1 (hourly beach surface)")
+    l1_parser = subparsers.add_parser("l1", help="Process L1 (hourly beach surface)", parents=[common_parser])
     l1_parser.add_argument("config", type=Path, help="Path to config JSON")
     l1_parser.add_argument("-o", "--output", type=Path, required=True, help="Output NetCDF path")
     l1_parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD or ISO format)")

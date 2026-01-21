@@ -124,8 +124,11 @@ class TimeResolvedDataset:
         x_centers = self.x1d
         t_centers = self.time_vec
 
-        # Create time index
-        time_index = pd.to_datetime(self.base_time) + pd.to_timedelta(t_centers, unit='s')
+        # Create time index (strip timezone for NetCDF compatibility)
+        base = pd.to_datetime(self.base_time)
+        if base.tz is not None:
+            base = base.tz_convert('UTC').tz_localize(None)
+        time_index = base + pd.to_timedelta(t_centers, unit='s')
 
         data_vars = {
             "elevation": (("x", "time"), self.Z_xt),
@@ -155,7 +158,7 @@ class TimeResolvedDataset:
                 "n_x": len(x_centers),
                 "n_t": len(t_centers),
                 "n_transects": self.n_transects,
-                "outlier_detection_applied": self.outlier_mask is not None,
+                "outlier_detection_applied": int(self.outlier_mask is not None),
             },
         )
 
@@ -214,12 +217,15 @@ def grid_to_dataset(grid: BinnedGrid, timestamp: datetime) -> xr.Dataset:
             "y_edges": grid.y_edges,
         },
     )
-    # add time as a timezone-aware dimension (always normalized to UTC)
+    # Convert timestamp to UTC and strip timezone for NetCDF compatibility
+    # (NetCDF doesn't support timezone-aware datetime64)
     idx = pd.DatetimeIndex([timestamp])
     if idx.tz is None:
         idx = idx.tz_localize("UTC")
     else:
         idx = idx.tz_convert("UTC")
+    # Strip timezone info for NetCDF compatibility
+    idx = idx.tz_localize(None)
     ds.attrs["time_timezone"] = "UTC"
     return ds.expand_dims(time=idx)
 

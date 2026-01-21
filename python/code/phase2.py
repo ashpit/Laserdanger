@@ -367,20 +367,26 @@ def residual_kernel_filter_delaunay(
     # Delaunay triangulation of the grid
     tri = Delaunay(grid_points)
 
-    # Track fitted Z values and whether each point was processed
+    # Use find_simplex to efficiently locate which triangle each point belongs to
+    # This is O(n log m) instead of O(n * m) where n=points, m=triangles
+    simplex_indices = tri.find_simplex(points[:, :2])
+
+    # Track fitted Z values
     z_interp = np.full(len(points), np.nan)
-    processed = np.zeros(len(points), dtype=bool)
 
-    # For each triangle, find points inside and fit plane
-    for simplex in tri.simplices:
-        tri_vertices = grid_points[simplex]
+    # Group points by their simplex for efficient processing
+    unique_simplices = np.unique(simplex_indices)
 
-        # Find points inside this triangle using barycentric coordinates
-        in_tri = _points_in_triangle(points[:, :2], tri_vertices)
+    for simplex_idx in unique_simplices:
+        if simplex_idx == -1:
+            # Points outside the triangulation - skip (will be kept if keep_unprocessed=True)
+            continue
+
+        # Find all points in this triangle
+        in_tri = simplex_indices == simplex_idx
 
         if in_tri.sum() < min_points_per_cell:
-            # Mark as processed but without z_interp (will be kept if keep_unprocessed=True)
-            processed[in_tri] = True
+            # Not enough points for reliable plane fit - skip
             continue
 
         section = points[in_tri]
@@ -388,7 +394,6 @@ def residual_kernel_filter_delaunay(
         # Fit plane using SVD (matches MATLAB fitPlane.m)
         z_fit = _fit_plane_svd(section)
         z_interp[in_tri] = z_fit
-        processed[in_tri] = True
 
     # Compute residuals
     residuals = np.abs(Z - z_interp)
