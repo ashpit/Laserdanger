@@ -27,20 +27,27 @@ def load_l1_dataset(path: Path) -> xr.Dataset:
 
 
 def calculate_slope(x: np.ndarray, z: np.ndarray,
-                    z_range: Optional[Tuple[float, float]] = None,
+                    x_max_relative: float = 60.0,
+                    z_min_threshold: Optional[float] = None,
                     use_robust: bool = True) -> Tuple[float, np.ndarray, np.ndarray]:
     """
     Calculate foreshore slope using linear regression.
 
+    Designed for Stockdon runup calculations - fits slope in the swash zone
+    from the seaward edge of the profile up to x_max_relative meters inland.
+
     Parameters
     ----------
     x : array
-        Cross-shore positions (m)
+        Cross-shore positions (m), can be UTM coordinates
     z : array
         Elevation values (m)
-    z_range : tuple, optional
-        (z_min, z_max) elevation range to fit slope within.
-        If None, uses the middle 60% of the elevation range.
+    x_max_relative : float
+        Maximum cross-shore distance from the seaward edge to include in fit (m).
+        Default 60m captures the typical swash/foreshore zone.
+    z_min_threshold : float, optional
+        Minimum elevation threshold - exclude points below this (rejects water noise).
+        If None, uses 10th percentile of elevations as threshold.
     use_robust : bool
         If True, use Theil-Sen robust regression (median-based, outlier resistant).
         If False, use ordinary least squares.
@@ -48,11 +55,11 @@ def calculate_slope(x: np.ndarray, z: np.ndarray,
     Returns
     -------
     slope : float
-        Beach slope (dz/dx, positive = seaward-sloping down)
+        Beach slope (dz/dx, positive = landward-sloping up)
     x_fit : array
-        X positions used for fit
+        X positions used for fit (for plotting fit line)
     z_fit : array
-        Fitted Z values
+        Fitted Z values (for plotting fit line)
     """
     from scipy import stats
 
@@ -64,25 +71,27 @@ def calculate_slope(x: np.ndarray, z: np.ndarray,
     if len(z_valid) < 3:
         return np.nan, np.array([]), np.array([])
 
-    # Determine elevation range for slope fitting
-    if z_range is None:
-        # Use percentiles to be robust to outliers when determining the range
-        z_p10 = np.percentile(z_valid, 10)
-        z_p90 = np.percentile(z_valid, 90)
-        z_range_span = z_p90 - z_p10
-        # Focus on middle 60% of the elevation range (20% to 80% of span)
-        z_range = (z_p10 + 0.20 * z_range_span,
-                   z_p10 + 0.80 * z_range_span)
+    # Convert to relative cross-shore distance from seaward edge
+    x_min = x_valid.min()
+    x_relative = x_valid - x_min
 
-    # Select points within the elevation range
-    in_range = (z_valid >= z_range[0]) & (z_valid <= z_range[1])
+    # Filter by cross-shore distance (swash zone constraint)
+    in_swash = x_relative <= x_max_relative
+
+    # Determine elevation threshold for rejecting water/noise at seaward edge
+    if z_min_threshold is None:
+        # Use 10th percentile as automatic threshold to exclude low outliers
+        z_min_threshold = np.percentile(z_valid[in_swash], 10)
+
+    # Apply both spatial and elevation filters
+    in_range = in_swash & (z_valid >= z_min_threshold)
     x_fit_pts = x_valid[in_range]
     z_fit_pts = z_valid[in_range]
 
     if len(x_fit_pts) < 3:
-        # Fall back to all valid points
-        x_fit_pts = x_valid
-        z_fit_pts = z_valid
+        # Fall back to just swash zone filter
+        x_fit_pts = x_valid[in_swash]
+        z_fit_pts = z_valid[in_swash]
 
     if len(x_fit_pts) < 2:
         return np.nan, np.array([]), np.array([])
@@ -112,7 +121,7 @@ def calculate_slope(x: np.ndarray, z: np.ndarray,
 
 
 def create_animation(ds: xr.Dataset, output_path: Path, fps: int = 2,
-                     y_index: Optional[int] = None):
+                     y_index: Optional[int] = None, x_max_relative: float = 20.0):
     """
     Create animated GIF of profiles with slope.
 
@@ -126,6 +135,9 @@ def create_animation(ds: xr.Dataset, output_path: Path, fps: int = 2,
         Frames per second
     y_index : int, optional
         Y index for profile extraction. If None, uses middle.
+    x_max_relative : float
+        Max cross-shore distance from seaward edge for slope fit (m).
+        Default 20m for typical swash zone / Stockdon foreshore slope.
     """
     x = ds.x.values
     n_times = ds.sizes["time"]
