@@ -1385,7 +1385,7 @@ Examples:
     l1_parser.add_argument("-n", type=int, help="Limit to first N files (for testing)")
 
     # L2 command
-    l2_parser = subparsers.add_parser("l2", help="Process L2 (wave-resolving)")
+    l2_parser = subparsers.add_parser("l2", help="Process L2 (wave-resolving)", parents=[common_parser])
     l2_parser.add_argument("config", type=Path, help="Path to config JSON")
     l2_parser.add_argument("-o", "--output", type=Path, required=True, help="Output NetCDF path")
     l2_parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD or ISO format)")
@@ -1398,7 +1398,7 @@ Examples:
     l2_parser.add_argument("-n", type=int, help="Limit to first N files (for testing)")
 
     # Batch L1 command
-    batch_parser = subparsers.add_parser("batch", help="Batch process L1 by day")
+    batch_parser = subparsers.add_parser("batch", help="Batch process L1 by day", parents=[common_parser])
     batch_parser.add_argument("config", type=Path, help="Path to config JSON")
     batch_parser.add_argument("-o", "--output-dir", type=Path, required=True, help="Output directory")
     batch_parser.add_argument("--start", type=str, required=True, help="Start date (YYYY-MM-DD)")
@@ -1409,7 +1409,7 @@ Examples:
     batch_parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers (default: 4)")
 
     # Batch L2 command
-    batch_l2_parser = subparsers.add_parser("batch-l2", help="Batch process L2 by time window")
+    batch_l2_parser = subparsers.add_parser("batch-l2", help="Batch process L2 by time window", parents=[common_parser])
     batch_l2_parser.add_argument("config", type=Path, help="Path to config JSON")
     batch_l2_parser.add_argument("-o", "--output-dir", type=Path, required=True, help="Output directory")
     batch_l2_parser.add_argument("--start", type=str, required=True, help="Start datetime (YYYY-MM-DD or ISO)")
