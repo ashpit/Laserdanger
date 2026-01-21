@@ -99,8 +99,8 @@ Examples:
         help="Extract multiple alongshore transects"
     )
     parser.add_argument(
-        "--no-outlier", action="store_true",
-        help="Disable outlier detection"
+        "--outlier-detection", action="store_true",
+        help="Enable outlier detection (disabled by default to preserve wave signals)"
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
@@ -200,7 +200,7 @@ Examples:
             time_bin_size=args.time_bin,
             x_bin_size=args.x_bin,
             multi_transect=args.multi_transect,
-            apply_outlier_detection=not args.no_outlier,
+            apply_outlier_detection=args.outlier_detection,
             skip_corrupt=True,
         )
 
