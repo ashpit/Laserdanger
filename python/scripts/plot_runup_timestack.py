@@ -77,11 +77,32 @@ def compute_water_level_score(
     return score
 
 
+def auto_threshold(Z_xt: np.ndarray, dt: float, ig_length: float = 100.0) -> float:
+    """
+    Automatically determine a reasonable runup threshold based on water level variability.
+
+    Returns threshold that should capture ~50-70% of the water level excursions.
+    """
+    dry_ref = runup.compute_dry_beach_reference(Z_xt, dt, ig_length)
+    water_level = Z_xt - dry_ref
+
+    # Use the 50th percentile of positive water levels as threshold
+    positive_wl = water_level[water_level > 0]
+    if len(positive_wl) > 100:
+        threshold = np.percentile(positive_wl, 50)
+        # Clamp to reasonable range
+        threshold = np.clip(threshold, 0.02, 0.5)
+    else:
+        threshold = 0.1  # fallback
+
+    return threshold
+
+
 def compute_runup_with_bounds(
     Z_xt: np.ndarray,
     x1d: np.ndarray,
     time_vec: np.ndarray,
-    threshold: float = 0.1,
+    threshold: float = None,
     ig_length: float = 100.0,
 ) -> dict:
     """
@@ -93,6 +114,13 @@ def compute_runup_with_bounds(
         - X_lower: lower bound (landward)
         - Z_runup: runup elevation (m)
     """
+    dt = np.median(np.diff(time_vec))
+
+    # Auto-determine threshold if not specified
+    if threshold is None:
+        threshold = auto_threshold(Z_xt, dt, ig_length)
+        print(f"  Auto-detected threshold: {threshold:.3f} m")
+
     # Main runup detection
     result = runup.compute_runup_stats(
         Z_xt, x1d, time_vec,
@@ -102,6 +130,9 @@ def compute_runup_with_bounds(
 
     X_runup = result.timeseries.X_runup
     Z_runup = result.timeseries.Z_runup
+
+    n_valid = np.sum(~np.isnan(X_runup))
+    print(f"  Runup detected at {n_valid}/{len(time_vec)} time steps ({100*n_valid/len(time_vec):.1f}%)")
 
     # Compute bounds using different thresholds
     # Upper bound (seaward) - lower threshold
@@ -127,6 +158,7 @@ def compute_runup_with_bounds(
         'Z_runup': Z_runup,
         'bulk': result.bulk,
         'spectrum': result.spectrum,
+        'threshold': threshold,
     }
 
 
@@ -135,7 +167,7 @@ def plot_runup_timestack(
     output_path: Path,
     t_start: float = None,
     t_end: float = None,
-    threshold: float = 0.1,
+    threshold: float = None,
     title: str = None,
     show: bool = False,
     dpi: int = 150,
@@ -145,6 +177,11 @@ def plot_runup_timestack(
 
     Panel (a): Intensity timestack with runup lines
     Panel (b): Water level score with runup lines
+
+    Parameters
+    ----------
+    threshold : float, optional
+        Runup detection threshold in meters. If None, auto-detected from data.
     """
     # Extract data
     Z = ds.elevation.values
@@ -162,7 +199,7 @@ def plot_runup_timestack(
         Z = Z[:, t_mask]
         I = I[:, t_mask]
 
-    # Compute runup
+    # Compute runup (threshold=None triggers auto-detection)
     runup_data = compute_runup_with_bounds(Z, x, t, threshold=threshold)
 
     # Compute water level score
@@ -233,7 +270,7 @@ def plot_intensity_only(
     output_path: Path,
     t_start: float = None,
     t_end: float = None,
-    threshold: float = 0.1,
+    threshold: float = None,
     title: str = None,
     show: bool = False,
     dpi: int = 150,
@@ -256,7 +293,7 @@ def plot_intensity_only(
         Z = Z[:, t_mask]
         I = I[:, t_mask]
 
-    # Compute runup
+    # Compute runup (threshold=None triggers auto-detection)
     runup_data = compute_runup_with_bounds(Z, x, t, threshold=threshold)
 
     # Create figure
@@ -300,12 +337,24 @@ def print_runup_stats(runup_data: dict, title: str = None):
     else:
         print("Runup Statistics")
     print("=" * 50)
+
+    # Check if we have valid runup data
+    n_valid = np.sum(~np.isnan(runup_data['X_runup']))
+    print(f"  Threshold used:    {runup_data.get('threshold', 'N/A'):.3f} m")
+    print(f"  Valid detections:  {n_valid}/{len(runup_data['X_runup'])}")
+
+    if n_valid < 10:
+        print("\n  WARNING: Insufficient runup detections for reliable statistics.")
+        print("  This may indicate calm conditions or data quality issues.")
+        print("=" * 50)
+        return
+
     bulk = runup_data['bulk']
     print(f"  Sig (IG band):     {bulk.Sig:.3f} m")
     print(f"  Sinc (incident):   {bulk.Sinc:.3f} m")
-    print(f"  Mean elevation:    {bulk.eta:.3f} m")
-    print(f"  R2% exceedance:    {bulk.R2:.3f} m")
-    print(f"  Beach slope:       {bulk.beta:.4f}")
+    print(f"  Mean elevation:    {bulk.eta:.3f} m" if not np.isnan(bulk.eta) else "  Mean elevation:    N/A")
+    print(f"  R2% exceedance:    {bulk.R2:.3f} m" if not np.isnan(bulk.R2) else "  R2% exceedance:    N/A")
+    print(f"  Beach slope:       {bulk.beta:.4f}" if not np.isnan(bulk.beta) else "  Beach slope:       N/A")
     print("=" * 50)
 
 
@@ -327,8 +376,8 @@ Examples:
                         help="Start time in seconds")
     parser.add_argument("--t-end", type=float, default=None,
                         help="End time in seconds")
-    parser.add_argument("--threshold", type=float, default=0.1,
-                        help="Runup detection threshold in meters (default: 0.1)")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Runup detection threshold in meters (default: auto-detect)")
     parser.add_argument("--title", type=str, default=None,
                         help="Figure title")
     parser.add_argument("--single-panel", action="store_true",
