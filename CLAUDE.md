@@ -34,35 +34,35 @@ pytest tests/ -v
 
 ```bash
 # Process all days in data folder (auto-discovers date range)
-python scripts/run_daily_l1.py --config configs/do_livox_config_20260112.json
+python scripts/processing/run_daily_l1.py --config configs/do_livox_config_20260112.json
 
 # Process specific date range
-python scripts/run_daily_l1.py --config configs/do_livox_config_20260112.json \
+python scripts/processing/run_daily_l1.py --config configs/do_livox_config_20260112.json \
     --start 2026-01-12 --end 2026-01-15
 
 # Preview what would be processed (dry run)
-python scripts/run_daily_l1.py --config configs/do_livox_config_20260112.json --dry-run
+python scripts/processing/run_daily_l1.py --config configs/do_livox_config_20260112.json --dry-run
 
 # Resume interrupted processing
-python scripts/run_daily_l1.py --config configs/do_livox_config_20260112.json --resume
+python scripts/processing/run_daily_l1.py --config configs/do_livox_config_20260112.json --resume
 ```
 
 ### L2 Processing (Wave-Resolving Timestacks)
 
 ```bash
 # Process all days in data folder
-python scripts/run_daily_l2.py --config configs/towr_livox_config_20260120.json
+python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_20260120.json
 
 # Process specific date range with higher temporal resolution
-python scripts/run_daily_l2.py --config configs/towr_livox_config_20260120.json \
+python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_20260120.json \
     --start 2026-01-20 --end 2026-01-21 --time-bin 0.25
 
 # Enable outlier detection (disabled by default to preserve wave signals)
-python scripts/run_daily_l2.py --config configs/towr_livox_config_20260120.json \
+python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_20260120.json \
     --outlier-detection
 
 # Preview what would be processed
-python scripts/run_daily_l2.py --config configs/towr_livox_config_20260120.json --dry-run
+python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_20260120.json --dry-run
 ```
 
 ## CLI Reference
@@ -114,7 +114,10 @@ python/
 ├── code/           # Main source (phase1-4, profiles, runup, utils, validation)
 ├── configs/        # Site/date-specific configs ({site}_livox_config_{YYYYMMDD}.json)
 ├── tests/          # pytest suite (186+ tests)
-├── scripts/        # CLI scripts (run_daily_l1.py, run_daily_l2.py)
+├── scripts/        # CLI scripts organized by purpose
+│   ├── processing/     # Data processing (run_daily_l1.py, run_daily_l2.py)
+│   ├── qc/             # Quality control & validation (verify_l1.py, verify_l2.py, assess_nc.py)
+│   └── visualization/  # Plotting & figures (visualize_l1.py, visualize_l2.py, gif_nc_l1.py, plot_runup.py)
 ├── data/           # Output data (level1/, level2/)
 └── docs/           # Documentation
 ```

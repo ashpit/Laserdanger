@@ -17,14 +17,17 @@ pip install -r requirements.txt
 # Run tests
 pytest tests/ -v
 
-# Process L1 data (single day) - use site/date-specific config from configs/
-python code/phase4.py l1 configs/do_livox_config_20260112.json -o output.nc --start 2026-01-12 --end 2026-01-13
+# Process L1 data (batch) - use site/date-specific config from configs/
+python scripts/processing/run_daily_l1.py --config configs/do_livox_config_20260112.json --start 2026-01-12 --end 2026-01-13
 
 # Process L2 data (wave-resolving)
-python code/phase4.py l2 configs/towr_livox_config_20260120.json -o l2_output.nc --start 2026-01-20 --end 2026-01-21
+python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_20260120.json --start 2026-01-20 --end 2026-01-21
 
-# Batch processing with resume capability
-python code/phase4.py batch configs/do_livox_config_20260112.json -o output_dir/ --start 2026-01-12 --end 2026-01-20
+# Visualize L1 output
+python scripts/visualization/visualize_l1.py data/level1/L1_20260112.nc
+
+# Validate against MATLAB
+python scripts/qc/verify_l1.py python_output.nc matlab_output.mat
 ```
 
 ## Project Structure
@@ -44,7 +47,20 @@ python/
 │   ├── do_livox_config_YYYYMMDD.json    # Director's Office site
 │   └── towr_livox_config_YYYYMMDD.json  # Tower site
 ├── tests/                   # Test suite (pytest)
-├── scripts/                 # Verification and utility scripts
+├── scripts/                 # CLI scripts organized by purpose
+│   ├── processing/         # Data processing scripts
+│   │   ├── run_daily_l1.py     # Batch L1 processing
+│   │   └── run_daily_l2.py     # Batch L2 processing
+│   ├── qc/                 # Quality control & validation
+│   │   ├── verify_l1.py        # Compare Python L1 to MATLAB
+│   │   ├── verify_l2.py        # Compare Python L2 to MATLAB
+│   │   └── assess_nc.py        # NC file assessment & diagnostics
+│   └── visualization/      # Plotting & figure generation
+│       ├── visualize_l1.py     # Standard L1 figures
+│       ├── visualize_l2.py     # Standard L2 figures
+│       ├── gif_nc_l1.py        # Animated L1 GIF with slope
+│       ├── plot_runup.py       # Full runup analysis figures
+│       └── plot_runup_timestack.py  # Publication-style runup timestack
 ├── examples/                # Usage examples
 ├── docs/                    # Documentation
 └── requirements.txt         # Python dependencies
@@ -93,36 +109,63 @@ python/
 
 ## CLI Reference
 
+### Processing Scripts
+
 ```bash
-# L1 Processing
-python code/phase4.py l1 CONFIG [OPTIONS]
+# L1 Processing (daily beach surfaces)
+python scripts/processing/run_daily_l1.py --config CONFIG [OPTIONS]
   --start DATE          Start date (YYYY-MM-DD)
   --end DATE            End date (YYYY-MM-DD)
-  -o, --output PATH     Output file (.nc)
+  --output-dir DIR      Output directory
   --bin-size FLOAT      Spatial bin size in meters (default: 0.10)
-  --mode-bin FLOAT      Mode histogram bin size (default: 0.05)
+  --resume              Resume from checkpoint
+  --dry-run             Preview without processing
   --verbose             Enable debug logging
-  --quiet               Suppress console output except errors
-  --log-file PATH       Write logs to file
   --no-progress         Disable progress bars
 
-# L2 Processing
-python code/phase4.py l2 CONFIG [OPTIONS]
+# L2 Processing (wave-resolving timestacks)
+python scripts/processing/run_daily_l2.py --config CONFIG [OPTIONS]
   --start DATE          Start date (YYYY-MM-DD)
   --end DATE            End date (YYYY-MM-DD)
-  -o, --output PATH     Output file (.nc)
+  --output-dir DIR      Output directory
   --time-bin FLOAT      Time bin size in seconds (default: 0.5)
+  --x-bin FLOAT         Spatial bin size (default: 0.1)
   --multi-transect      Extract multiple alongshore transects
-  --no-outlier          Disable outlier detection
-  --intensity-contours  Extract intensity contours
-
-# Batch Processing
-python code/phase4.py batch CONFIG [OPTIONS]
-  --start DATE          Start date (YYYY-MM-DD)
-  --end DATE            End date (YYYY-MM-DD)
-  -o, --output DIR      Output directory
+  --outlier-detection   Enable outlier detection
   --resume              Resume from checkpoint
-  --parallel N          Use N parallel workers
+```
+
+### QC Scripts
+
+```bash
+# Verify L1 against MATLAB
+python scripts/qc/verify_l1.py python.nc matlab.mat [-o report.json]
+python scripts/qc/verify_l1.py python_dir/ matlab_dir/ --batch
+
+# Verify L2 against MATLAB
+python scripts/qc/verify_l2.py python.nc matlab.mat [-o report.json]
+
+# Assess NC file contents
+python scripts/qc/assess_nc.py data/level2/L2_20260120.nc
+```
+
+### Visualization Scripts
+
+```bash
+# L1 visualization (DEM, stats, profiles)
+python scripts/visualization/visualize_l1.py L1_file.nc [-o output_dir/]
+
+# L2 visualization (timestacks, intensity, wave detection)
+python scripts/visualization/visualize_l2.py L2_file.nc [-o output_dir/]
+
+# Animated L1 GIF with slope calculation
+python scripts/visualization/gif_nc_l1.py L1_file.nc [--fps 2] [--save-slopes]
+
+# Runup analysis figures
+python scripts/visualization/plot_runup.py L2_file.nc [-o output_dir/]
+
+# Publication-style runup timestack
+python scripts/visualization/plot_runup_timestack.py L2_file.nc [--t-start 200 --t-end 360]
 ```
 
 ## Configuration
@@ -212,13 +255,13 @@ pytest tests/test_edge_cases.py -v
 
 ```bash
 # Compare L1 outputs
-python scripts/verify_l1.py python_output.nc matlab_output.mat
+python scripts/qc/verify_l1.py python_output.nc matlab_output.mat
 
 # Compare L2 outputs
-python scripts/verify_l2.py python_output.nc matlab_output.mat
+python scripts/qc/verify_l2.py python_output.nc matlab_output.mat
 
 # Batch validation
-python scripts/verify_l1.py python_dir/ matlab_dir/ --batch
+python scripts/qc/verify_l1.py python_dir/ matlab_dir/ --batch
 ```
 
 ## Common Tasks

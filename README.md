@@ -70,14 +70,14 @@ Edit the config with your site-specific settings:
 cd python
 
 # Process all days found in dataFolder
-python scripts/run_daily_l1.py --config configs/mysite_livox_config_20260122.json
+python scripts/processing/run_daily_l1.py --config configs/mysite_livox_config_20260122.json
 
 # Process specific date range
-python scripts/run_daily_l1.py --config configs/mysite_livox_config_20260122.json \
+python scripts/processing/run_daily_l1.py --config configs/mysite_livox_config_20260122.json \
     --start 2026-01-15 --end 2026-01-20
 
 # Preview without processing (dry run)
-python scripts/run_daily_l1.py --config configs/mysite_livox_config_20260122.json --dry-run
+python scripts/processing/run_daily_l1.py --config configs/mysite_livox_config_20260122.json --dry-run
 ```
 
 **Output**: `python/data/level1/L1_YYYYMMDD.nc` (one NetCDF per day)
@@ -86,10 +86,10 @@ python scripts/run_daily_l1.py --config configs/mysite_livox_config_20260122.jso
 
 ```bash
 # Process all days
-python scripts/run_daily_l2.py --config configs/mysite_livox_config_20260122.json
+python scripts/processing/run_daily_l2.py --config configs/mysite_livox_config_20260122.json
 
 # Higher temporal resolution (4 Hz)
-python scripts/run_daily_l2.py --config configs/mysite_livox_config_20260122.json --time-bin 0.25
+python scripts/processing/run_daily_l2.py --config configs/mysite_livox_config_20260122.json --time-bin 0.25
 ```
 
 **Output**: `python/data/level2/L2_YYYYMMDD.nc` (one NetCDF per day)
@@ -98,10 +98,10 @@ python scripts/run_daily_l2.py --config configs/mysite_livox_config_20260122.jso
 
 ## CLI Reference
 
-### L1 Processing: `run_daily_l1.py`
+### L1 Processing: `scripts/processing/run_daily_l1.py`
 
 ```
-python scripts/run_daily_l1.py --config PATH [OPTIONS]
+python scripts/processing/run_daily_l1.py --config PATH [OPTIONS]
 
 Required:
   --config PATH       Path to JSON config file
@@ -118,10 +118,10 @@ Options:
   --no-progress       Disable progress bars
 ```
 
-### L2 Processing: `run_daily_l2.py`
+### L2 Processing: `scripts/processing/run_daily_l2.py`
 
 ```
-python scripts/run_daily_l2.py --config PATH [OPTIONS]
+python scripts/processing/run_daily_l2.py --config PATH [OPTIONS]
 
 Required:
   --config PATH       Path to JSON config file
@@ -210,7 +210,10 @@ To determine your transformation matrix:
 python/
 ├── code/           # Source modules (phase1-4, profiles, runup, utils)
 ├── configs/        # Site/date-specific JSON configs
-├── scripts/        # CLI entry points (run_daily_l1.py, run_daily_l2.py)
+├── scripts/        # CLI scripts organized by purpose
+│   ├── processing/     # run_daily_l1.py, run_daily_l2.py
+│   ├── qc/             # verify_l1.py, verify_l2.py, assess_nc.py
+│   └── visualization/  # visualize_l1.py, visualize_l2.py, gif_nc_l1.py, plot_runup.py
 ├── tests/          # pytest suite (186+ tests)
 ├── data/           # Output data
 │   ├── level1/     # L1 NetCDF outputs
