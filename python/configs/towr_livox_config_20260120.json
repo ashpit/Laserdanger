@@ -1,7 +1,7 @@
 {
   "dataFolder": "/Volumes/camera/TOWR-lidar/surfside-test_20260120/lvx/",
-  "processFolder": "/Volumes/camera/TOWR-lidar/surfside-test_20260120/lvx_processed/",
-  "plotFolder": "/Volumes/camera/TOWR-lidar/surfside-test_20260120/lvx_figures/",
+  "processFolder": "/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs/github/Laserdanger/python/data/TOWR-lidar/surfside-test_20260120/lvx_processed/",
+  "plotFolder": "/Volumes/group/LiDAR/LidarProcessing/LidarProcessingCliffs/github/Laserdanger/python/data/TOWR-lidar/surfside-test_20260120/lvx_figures/",
   "LidarBoundary": [
     [
       476100,
