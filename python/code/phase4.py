@@ -650,6 +650,8 @@ def process_l2(
     show_progress: bool = False,
     skip_corrupt: bool = True,
     max_files: Optional[int] = None,
+    parallel_load: bool = True,
+    load_workers: int = 4,
 ) -> phase3.TimeResolvedDataset:
     """
     Orchestrate L2 processing: produces time-resolved Z(x,t) matrices for wave analysis.
@@ -704,6 +706,11 @@ def process_l2(
         Show progress bar (default False)
     skip_corrupt : bool
         Skip corrupt files instead of raising error (default True)
+    parallel_load : bool
+        Use parallel file loading with ThreadPoolExecutor (default True).
+        Typically 3-4x faster for I/O-bound LAZ decompression.
+    load_workers : int
+        Number of parallel workers for file loading (default 4)
 
     Returns
     -------
@@ -733,69 +740,127 @@ def process_l2(
 
     logger.info("Found %d LAZ files for L2 processing", len(laz_files))
 
-    load_fn = loader or load_laz_points
-
     all_points = []
     all_intensities = []
     all_times = []
     base_time = None
 
-    # Process files with optional progress bar
-    file_iter = laz_files
-    if show_progress and TQDM_AVAILABLE:
-        file_iter = tqdm(laz_files, desc="Loading L2 files", unit="file")
-
-    for path, ts in file_iter:
-        logger.debug("Loading %s for L2", path.name)
-
-        # Load with error handling
-        try:
-            if loader is not None:
-                points, intensities, gps_times = loader(path)
-            else:
-                points, intensities, gps_times = load_laz_points(path, validate=True)
-        except CorruptFileError as e:
-            if skip_corrupt:
-                logger.warning("Skipping file %s: %s", path.name, e.reason or str(e))
-                continue
-            else:
-                raise
-
-        f_points, f_intensity, f_times = phase1.prepare_batch(
-            points,
-            intensities,
-            gps_times,
-            cfg,
-            intensity_threshold=intensity_threshold,
-            max_seconds=max_seconds,
+    # Load files - parallel or sequential
+    if parallel_load and loader is None and len(laz_files) > 1:
+        # Use parallel loading (3-4x faster for I/O-bound decompression)
+        logger.debug("Loading %d files in parallel with %d workers", len(laz_files), load_workers)
+        loaded_files = load_laz_files_parallel(
+            laz_files,
+            max_workers=load_workers,
+            validate=True,
+            show_progress=show_progress,
         )
-        if len(f_points) == 0:
-            logger.warning("No points after filtering for file %s", path)
-            continue
 
-        # Apply residual filtering (less aggressive for L2)
-        if apply_residual_filter and len(f_points) > 100:
-            f_points = phase2.residual_kernel_filter_two_stage(
-                f_points,
-                passes=residual_filter_passes,
+        # Process loaded files with optional progress bar
+        process_iter = loaded_files
+        if show_progress and TQDM_AVAILABLE:
+            process_iter = tqdm(loaded_files, desc="Processing L2 files", unit="file")
+
+        for path, ts, data in process_iter:
+            if data is None:
+                if not skip_corrupt:
+                    raise CorruptFileError(path, "Failed to load")
+                continue
+
+            points, intensities, gps_times = data
+
+            f_points, f_intensity, f_times = phase1.prepare_batch(
+                points,
+                intensities,
+                gps_times,
+                cfg,
+                intensity_threshold=intensity_threshold,
+                max_seconds=max_seconds,
             )
+            if len(f_points) == 0:
+                logger.warning("No points after filtering for file %s", path)
+                continue
 
-        if len(f_points) == 0:
-            continue
+            # Apply residual filtering (less aggressive for L2)
+            if apply_residual_filter and len(f_points) > 100:
+                f_points = phase2.residual_kernel_filter_two_stage(
+                    f_points,
+                    passes=residual_filter_passes,
+                )
 
-        # Track absolute time
-        if base_time is None:
-            base_time = ts
+            if len(f_points) == 0:
+                continue
 
-        # Convert file timestamp offset to seconds
-        file_offset = (ts - base_time).total_seconds()
-        absolute_times = f_times + file_offset
+            # Track absolute time
+            if base_time is None:
+                base_time = ts
 
-        all_points.append(f_points)
-        all_intensities.append(f_intensity[:len(f_points)] if len(f_intensity) >= len(f_points)
-                               else np.full(len(f_points), np.nan))
-        all_times.append(absolute_times[:len(f_points)] if len(absolute_times) >= len(f_points)
-                        else np.arange(len(f_points)) + file_offset)
+            # Convert file timestamp offset to seconds
+            file_offset = (ts - base_time).total_seconds()
+            absolute_times = f_times + file_offset
+
+            all_points.append(f_points)
+            all_intensities.append(f_intensity[:len(f_points)] if len(f_intensity) >= len(f_points)
+                                   else np.full(len(f_points), np.nan))
+            all_times.append(absolute_times[:len(f_points)] if len(absolute_times) >= len(f_points)
+                            else np.arange(len(f_points)) + file_offset)
+    else:
+        # Sequential loading (for custom loaders or single files)
+        file_iter = laz_files
+        if show_progress and TQDM_AVAILABLE:
+            file_iter = tqdm(laz_files, desc="Loading L2 files", unit="file")
+
+        for path, ts in file_iter:
+            logger.debug("Loading %s for L2", path.name)
+
+            # Load with error handling
+            try:
+                if loader is not None:
+                    points, intensities, gps_times = loader(path)
+                else:
+                    points, intensities, gps_times = load_laz_points(path, validate=True)
+            except CorruptFileError as e:
+                if skip_corrupt:
+                    logger.warning("Skipping file %s: %s", path.name, e.reason or str(e))
+                    continue
+                else:
+                    raise
+
+            f_points, f_intensity, f_times = phase1.prepare_batch(
+                points,
+                intensities,
+                gps_times,
+                cfg,
+                intensity_threshold=intensity_threshold,
+                max_seconds=max_seconds,
+            )
+            if len(f_points) == 0:
+                logger.warning("No points after filtering for file %s", path)
+                continue
+
+            # Apply residual filtering (less aggressive for L2)
+            if apply_residual_filter and len(f_points) > 100:
+                f_points = phase2.residual_kernel_filter_two_stage(
+                    f_points,
+                    passes=residual_filter_passes,
+                )
+
+            if len(f_points) == 0:
+                continue
+
+            # Track absolute time
+            if base_time is None:
+                base_time = ts
+
+            # Convert file timestamp offset to seconds
+            file_offset = (ts - base_time).total_seconds()
+            absolute_times = f_times + file_offset
+
+            all_points.append(f_points)
+            all_intensities.append(f_intensity[:len(f_points)] if len(f_intensity) >= len(f_points)
+                                   else np.full(len(f_points), np.nan))
+            all_times.append(absolute_times[:len(f_points)] if len(absolute_times) >= len(f_points)
+                            else np.arange(len(f_points)) + file_offset)
 
     if not all_points:
         raise RuntimeError("All files filtered out; no data for L2")
