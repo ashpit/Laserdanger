@@ -65,6 +65,19 @@ python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_202
 python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_20260120.json --dry-run
 ```
 
+### Quality Control
+
+```bash
+# Run comprehensive L1 QC diagnostics (outputs figures to plotFolder/qc/level1/)
+python scripts/qc/qc_level1.py --config configs/do_livox_config_20260112.json
+
+# Run comprehensive L2 QC diagnostics (outputs figures to plotFolder/qc/level2/)
+python scripts/qc/qc_level2.py --config configs/towr_livox_config_20260120.json
+
+# QC for specific date only
+python scripts/qc/qc_level1.py --config configs/do_livox_config_20260112.json --date 2026-01-12
+```
+
 ## CLI Reference
 
 ### run_daily_l1.py
@@ -116,7 +129,7 @@ python/
 ├── tests/          # pytest suite (186+ tests)
 ├── scripts/        # CLI scripts organized by purpose
 │   ├── processing/     # Data processing (run_daily_l1.py, run_daily_l2.py)
-│   ├── qc/             # Quality control & validation (verify_l1.py, verify_l2.py, assess_nc.py)
+│   ├── qc/             # Quality control (qc_level1.py, qc_level2.py, verify_l1.py, verify_l2.py)
 │   └── visualization/  # Plotting & figures (visualize_l1.py, visualize_l2.py, gif_nc_l1.py, plot_runup.py)
 ├── data/           # Output data (level1/, level2/)
 └── docs/           # Documentation
@@ -133,11 +146,26 @@ Sites:
 
 Config file fields:
 - `dataFolder` - Path to raw .laz files
-- `processFolder` - Output directory
+- `processFolder` - Output directory for processed NetCDF files (level1/, level2/)
+- `plotFolder` - Output directory for figures and QC reports (level1/, level2/, qc/)
 - `transformMatrix` - 4×4 homogeneous transform (lidar → UTM)
 - `LidarBoundary` - Polygon vertices (UTM) for spatial filtering
 
 To add a new site, copy an existing config and update the paths and transform matrix.
+
+## Visualization
+
+All visualization scripts support `--config` to automatically output figures to `plotFolder`:
+
+```bash
+# L1 visualizations → plotFolder/level1/
+python scripts/visualization/visualize_l1.py L1_file.nc --config configs/do_livox_config_20260112.json
+python scripts/visualization/gif_nc_l1.py L1_file.nc --config configs/do_livox_config_20260112.json
+
+# L2 visualizations → plotFolder/level2/
+python scripts/visualization/visualize_l2.py L2_file.nc --config configs/towr_livox_config_20260120.json
+python scripts/visualization/plot_runup.py L2_file.nc --config configs/towr_livox_config_20260120.json
+```
 
 ## Dependencies
 

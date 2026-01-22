@@ -768,7 +768,7 @@ Examples:
         help="Variable to plot (default: elevation_mode)"
     )
     parser.add_argument(
-        "--cmap", "-c",
+        "--cmap",
         type=str,
         default="terrain",
         help="Matplotlib colormap (default: terrain)"
