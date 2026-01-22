@@ -79,20 +79,48 @@ def load_config(path: Path) -> Config:
     )
 
 
+def _parse_timestamp_from_filename(stem: str) -> Optional[datetime]:
+    """
+    Parse timestamp from LAZ filename stem. Supports multiple formats:
+    - POSIX timestamp: do-lidar_1735689600 -> timestamp
+    - Date format: TOWR-test_20260120_200023_UTC -> 2026-01-20 20:00:23 UTC
+    """
+    import re
+
+    # Try POSIX timestamp (e.g., do-lidar_1735689600)
+    posix_match = re.search(r'(\d{10,})$', stem)
+    if posix_match:
+        try:
+            return datetime.fromtimestamp(int(posix_match.group(1)), tz=timezone.utc)
+        except (ValueError, OSError):
+            pass
+
+    # Try date format: *_YYYYMMDD_HHMMSS_UTC (e.g., TOWR-test_20260120_200023_UTC)
+    date_match = re.search(r'_(\d{8})_(\d{6})_UTC$', stem)
+    if date_match:
+        try:
+            date_str = date_match.group(1)
+            time_str = date_match.group(2)
+            return datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+
+    return None
+
+
 def discover_laz_files(
     folder: Path, start: Optional[datetime] = None, end: Optional[datetime] = None
 ) -> List[Tuple[Path, datetime]]:
     """
-    Find do-lidar_*.laz files, parse POSIX timestamps from filenames, and sort them.
+    Find all .laz files, parse timestamps from filenames, and sort them.
+    Supports multiple filename formats (POSIX timestamps and YYYYMMDD_HHMMSS_UTC).
     Filters by [start, end] if provided (naive datetimes interpreted as UTC).
     """
-    paths = list(folder.glob("do-lidar_*.laz"))
+    paths = list(folder.glob("*.laz"))
     results: List[Tuple[Path, datetime]] = []
     for p in paths:
-        stem = p.stem.replace("do-lidar_", "")
-        try:
-            ts = datetime.fromtimestamp(int(stem), tz=timezone.utc)
-        except (ValueError, OSError):
+        ts = _parse_timestamp_from_filename(p.stem)
+        if ts is None:
             continue
         results.append((p, ts))
 
