@@ -57,6 +57,14 @@ python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_202
 python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_20260120.json \
     --start 2026-01-20 --end 2026-01-21 --time-bin 0.25
 
+# MEMORY-EFFICIENT: Process in chunks of 10 files at a time (recommended for large datasets)
+python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_20260120.json \
+    --chunk-size 10
+
+# Resume interrupted chunked processing
+python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_20260120.json \
+    --chunk-size 10 --resume
+
 # Enable outlier detection (disabled by default to preserve wave signals)
 python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_20260120.json \
     --outlier-detection
@@ -113,6 +121,9 @@ Options:
   --verbose, -v       Enable debug logging
   --quiet, -q         Suppress non-error output
   --no-progress       Disable progress bars
+  --chunk-size INT    Process LAZ files in chunks (recommended: 8-10 for large datasets)
+  --chunk-dir DIR     Directory for intermediate chunk files (default: temp)
+  --keep-chunks       Keep intermediate chunk files after processing
 ```
 
 ## Output Files
@@ -155,19 +166,25 @@ To add a new site, copy an existing config and update the paths and transform ma
 
 ## Visualization
 
-All visualization scripts support `--config` to automatically output figures to `plotFolder`:
+All visualization scripts use `--config` (required) to auto-discover files and output to `plotFolder`.
+By default they process ALL files; use `--input` for a single file.
 
 ```bash
 # L1 visualizations → plotFolder/level1/
-python scripts/visualization/visualize_l1.py L1_file.nc --config configs/do_livox_config_20260112.json
+python scripts/visualization/visualize_l1.py --config configs/do_livox_config_20260112.json
+python scripts/visualization/visualize_l1.py --config configs/do_livox_config_20260112.json --input L1_20260112.nc
 
 # Animated L1 GIFs (processes ALL L1 files from processFolder/level1/)
 python scripts/visualization/gif_nc_l1.py --config configs/do_livox_config_20260112.json
-python scripts/visualization/gif_nc_l1.py --config configs/do_livox_config_20260112.json --input L1_20260112.nc  # single file
+python scripts/visualization/gif_nc_l1.py --config configs/do_livox_config_20260112.json --input L1_20260112.nc
 
 # L2 visualizations → plotFolder/level2/
-python scripts/visualization/visualize_l2.py L2_file.nc --config configs/towr_livox_config_20260120.json
-python scripts/visualization/plot_runup.py L2_file.nc --config configs/towr_livox_config_20260120.json
+python scripts/visualization/visualize_l2.py --config configs/towr_livox_config_20260120.json
+python scripts/visualization/visualize_l2.py --config configs/towr_livox_config_20260120.json --input L2_20260120.nc
+
+# Runup analysis → plotFolder/level2/
+python scripts/visualization/plot_runup.py --config configs/towr_livox_config_20260120.json
+python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json
 ```
 
 ## Dependencies

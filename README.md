@@ -111,19 +111,25 @@ python scripts/qc/qc_level1.py --config configs/mysite_livox_config_20260122.jso
 
 ### 6. Generate Visualizations
 
+All visualization scripts use `--config` (required) and process ALL files by default.
+Use `--input` to process a single file.
+
 ```bash
-# L1 visualization (uses config to determine output directory)
-python scripts/visualization/visualize_l1.py L1_file.nc --config configs/mysite_livox_config_20260122.json
+# L1 visualization (processes ALL L1 files from processFolder/level1/)
+python scripts/visualization/visualize_l1.py --config configs/mysite_livox_config_20260122.json
+python scripts/visualization/visualize_l1.py --config configs/mysite_livox_config_20260122.json --input L1_20260122.nc  # single file
 
 # Animated GIFs with slope calculation (processes ALL L1 files from processFolder/level1/)
 python scripts/visualization/gif_nc_l1.py --config configs/mysite_livox_config_20260122.json
 python scripts/visualization/gif_nc_l1.py --config configs/mysite_livox_config_20260122.json --input L1_20260122.nc  # single file
 
-# L2 visualization
-python scripts/visualization/visualize_l2.py L2_file.nc --config configs/mysite_livox_config_20260122.json
+# L2 visualization (processes ALL L2 files from processFolder/level2/)
+python scripts/visualization/visualize_l2.py --config configs/mysite_livox_config_20260122.json
+python scripts/visualization/visualize_l2.py --config configs/mysite_livox_config_20260122.json --input L2_20260122.nc  # single file
 
-# Runup analysis figures
-python scripts/visualization/plot_runup.py L2_file.nc --config configs/mysite_livox_config_20260122.json
+# Runup analysis figures (processes ALL L2 files from processFolder/level2/)
+python scripts/visualization/plot_runup.py --config configs/mysite_livox_config_20260122.json
+python scripts/visualization/plot_runup_timestack.py --config configs/mysite_livox_config_20260122.json
 ```
 
 ---

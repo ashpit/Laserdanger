@@ -2,14 +2,22 @@
 """
 Plot runup timestack figures similar to published wave runup visualizations.
 
+Processes all L2 NetCDF files from config's processFolder/level2/ directory.
+Outputs figures to config's plotFolder/level2/ directory.
+
 Creates two-panel figures:
   (a) Intensity timestack with runup line overlay
   (b) Water level "score" with runup line overlay
 
 Usage:
-    python scripts/plot_runup_timestack.py L2_output.nc
-    python scripts/plot_runup_timestack.py L2_output.nc -o figures/
-    python scripts/plot_runup_timestack.py L2_output.nc --t-start 200 --t-end 360
+    # Process ALL L2 files from processFolder/level2/
+    python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json
+
+    # Process a single file
+    python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --input L2_20260120.nc
+
+    # With time window
+    python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --t-start 200 --t-end 360
 """
 import argparse
 from pathlib import Path
@@ -25,6 +33,7 @@ from matplotlib.colors import TwoSlopeNorm
 from scipy.ndimage import minimum_filter1d, uniform_filter1d, median_filter
 from scipy import signal
 
+from phase1 import load_config
 import runup
 
 
@@ -358,22 +367,100 @@ def print_runup_stats(runup_data: dict, title: str = None):
     print("=" * 50)
 
 
+def process_single_file(
+    nc_path: Path,
+    output_dir: Path,
+    t_start: float = None,
+    t_end: float = None,
+    threshold: float = None,
+    title: str = None,
+    single_panel: bool = False,
+    show: bool = False,
+    dpi: int = 150,
+    no_stats: bool = False,
+) -> bool:
+    """
+    Process a single L2 NetCDF file and generate runup timestack figures.
+
+    Returns True if successful, False otherwise.
+    """
+    try:
+        # Load data
+        print(f"\nLoading: {nc_path.name}")
+        ds = load_l2_data(nc_path)
+
+        # Create date-specific output directory
+        date_str = nc_path.stem.replace("L2_", "")[:8]
+        date_output_dir = output_dir / date_str
+        date_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate filename
+        stem = nc_path.stem
+        if t_start is not None or t_end is not None:
+            t_str = f"_t{t_start or 0:.0f}-{t_end or 'end'}"
+        else:
+            t_str = ""
+
+        # Use date as title if not specified
+        file_title = title if title else f"L2 Runup: {date_str}"
+
+        # Plot
+        if single_panel:
+            output_path = date_output_dir / f"{stem}_runup_intensity{t_str}.png"
+            plot_intensity_only(
+                ds, output_path,
+                t_start=t_start, t_end=t_end,
+                threshold=threshold,
+                title=file_title,
+                show=show,
+                dpi=dpi,
+            )
+        else:
+            output_path = date_output_dir / f"{stem}_runup_timestack{t_str}.png"
+            runup_data = plot_runup_timestack(
+                ds, output_path,
+                t_start=t_start, t_end=t_end,
+                threshold=threshold,
+                title=file_title,
+                show=show,
+                dpi=dpi,
+            )
+
+            if not no_stats:
+                print_runup_stats(runup_data, title=file_title)
+
+        ds.close()
+        return True
+
+    except Exception as e:
+        print(f"Error processing {nc_path.name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Plot runup timestack figures with runup line overlays",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python scripts/plot_runup_timestack.py L2_output.nc
-    python scripts/plot_runup_timestack.py L2_output.nc --t-start 200 --t-end 360
-    python scripts/plot_runup_timestack.py L2_output.nc -o figures/ --title "Del Mar 2025-05-03"
+    # Process ALL L2 files from processFolder/level2/
+    python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json
+
+    # Process a single file
+    python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --input L2_20260120.nc
+
+    # With time window
+    python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --t-start 200 --t-end 360
         """
     )
-    parser.add_argument("input", type=Path, help="Input L2 NetCDF file")
-    parser.add_argument("-c", "--config", type=Path, default=None,
-                        help="Config file to determine output directory (uses plot_folder/level2/)")
+    parser.add_argument("-c", "--config", type=Path, required=True,
+                        help="Config file (required) - determines input/output directories")
+    parser.add_argument("-i", "--input", type=str, default=None,
+                        help="Single input filename to process (default: process ALL L2_*.nc files)")
     parser.add_argument("-o", "--output-dir", type=Path, default=None,
-                        help="Output directory (default: config plot_folder/level2/ or input dir)")
+                        help="Override output directory (default: config's plotFolder/level2/)")
     parser.add_argument("--t-start", type=float, default=None,
                         help="Start time in seconds")
     parser.add_argument("--t-end", type=float, default=None,
@@ -381,7 +468,7 @@ Examples:
     parser.add_argument("--threshold", type=float, default=None,
                         help="Runup detection threshold in meters (default: auto-detect)")
     parser.add_argument("--title", type=str, default=None,
-                        help="Figure title")
+                        help="Figure title (default: auto-generated from date)")
     parser.add_argument("--single-panel", action="store_true",
                         help="Create single-panel intensity plot only")
     parser.add_argument("--show", action="store_true",
@@ -393,61 +480,62 @@ Examples:
 
     args = parser.parse_args()
 
-    if not args.input.exists():
-        print(f"Error: Input file not found: {args.input}")
+    # Load config
+    config = load_config(args.config)
+
+    # Set input directory (processFolder/level2/)
+    input_dir = config.process_folder / "level2"
+    if not input_dir.exists():
+        print(f"Error: Input directory not found: {input_dir}")
         return 1
 
     # Set output directory
     if args.output_dir is not None:
         output_dir = args.output_dir
-    elif args.config is not None:
-        # Use config's plot_folder with level2/ subfolder
-        from phase1 import load_config
-        config = load_config(args.config)
+    else:
         output_dir = config.plot_folder / "level2"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Discover L2 files
+    if args.input is not None:
+        # Single file mode
+        nc_path = input_dir / args.input
+        if not nc_path.exists():
+            print(f"Error: Input file not found: {nc_path}")
+            return 1
+        nc_files = [nc_path]
     else:
-        # Fallback: figures/ subdirectory in input dir
-        output_dir = args.input.parent / "figures"
+        # Batch mode - find all L2_*.nc files
+        nc_files = sorted(input_dir.glob("L2_*.nc"))
 
-    # Load data
-    print(f"Loading: {args.input}")
-    ds = load_l2_data(args.input)
+    if not nc_files:
+        print(f"No L2 NetCDF files found in: {input_dir}")
+        return 1
 
-    # Generate filename
-    stem = args.input.stem
-    if args.t_start is not None or args.t_end is not None:
-        t_str = f"_t{args.t_start or 0:.0f}-{args.t_end or 'end'}"
-    else:
-        t_str = ""
+    print(f"Found {len(nc_files)} L2 file(s) in: {input_dir}")
+    print(f"Output directory: {output_dir}")
 
-    # Plot
-    if args.single_panel:
-        output_path = output_dir / f"{stem}_runup_intensity{t_str}.png"
-        plot_intensity_only(
-            ds, output_path,
+    # Process each file
+    success_count = 0
+    for nc_path in nc_files:
+        if process_single_file(
+            nc_path, output_dir,
             t_start=args.t_start, t_end=args.t_end,
             threshold=args.threshold,
             title=args.title,
+            single_panel=args.single_panel,
             show=args.show,
             dpi=args.dpi,
-        )
-    else:
-        output_path = output_dir / f"{stem}_runup_timestack{t_str}.png"
-        runup_data = plot_runup_timestack(
-            ds, output_path,
-            t_start=args.t_start, t_end=args.t_end,
-            threshold=args.threshold,
-            title=args.title,
-            show=args.show,
-            dpi=args.dpi,
-        )
+            no_stats=args.no_stats,
+        ):
+            success_count += 1
 
-        if not args.no_stats:
-            print_runup_stats(runup_data, title=args.title)
+    # Summary
+    print("\n" + "=" * 50)
+    print(f"Processed {success_count}/{len(nc_files)} files successfully")
+    print("=" * 50)
 
-    ds.close()
-    print("\nDone!")
-    return 0
+    return 0 if success_count == len(nc_files) else 1
 
 
 if __name__ == "__main__":

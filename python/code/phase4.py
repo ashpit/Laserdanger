@@ -1185,6 +1185,387 @@ def process_l1_batch(
     return progress
 
 
+@dataclass
+class ChunkCheckpoint:
+    """Checkpoint for chunked L2 processing within a single day."""
+    config_path: str
+    date_str: str
+    output_path: str
+    chunk_dir: str
+    chunk_size: int
+    total_files: int
+    total_chunks: int
+    completed_chunks: List[int]
+    failed_chunks: List[int]
+    kwargs: Dict[str, Any]
+    timestamp: str = ""
+
+    def __post_init__(self):
+        if not self.timestamp:
+            self.timestamp = datetime.now().isoformat()
+
+    def to_dict(self) -> Dict:
+        return {
+            "config_path": self.config_path,
+            "date_str": self.date_str,
+            "output_path": self.output_path,
+            "chunk_dir": self.chunk_dir,
+            "chunk_size": self.chunk_size,
+            "total_files": self.total_files,
+            "total_chunks": self.total_chunks,
+            "completed_chunks": self.completed_chunks,
+            "failed_chunks": self.failed_chunks,
+            "kwargs": self.kwargs,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "ChunkCheckpoint":
+        return cls(**data)
+
+    def save(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @classmethod
+    def load(cls, path: Path) -> "ChunkCheckpoint":
+        with open(path) as f:
+            return cls.from_dict(json.load(f))
+
+
+def process_l2_chunked(
+    config_path: Path,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    chunk_size: int = 10,
+    output_path: Optional[Path] = None,
+    chunk_dir: Optional[Path] = None,
+    resume: bool = False,
+    cleanup_chunks: bool = True,
+    show_progress: bool = True,
+    **kwargs,
+) -> phase3.TimeResolvedDataset:
+    """
+    Process L2 data in memory-efficient chunks, then concatenate.
+
+    This function processes LAZ files in batches to avoid memory issues
+    when dealing with large numbers of files. Each chunk is processed
+    independently and saved to a temporary file, then all chunks are
+    concatenated along the time dimension.
+
+    Parameters
+    ----------
+    config_path : Path
+        Path to livox_config.json
+    start, end : datetime, optional
+        Date range to process
+    chunk_size : int
+        Number of LAZ files to process per chunk (default 10)
+    output_path : Path, optional
+        Final output path. If provided, saves result here.
+    chunk_dir : Path, optional
+        Directory for intermediate chunk files. If None, creates a temp dir.
+    resume : bool
+        Resume from checkpoint if available (default False)
+    cleanup_chunks : bool
+        Delete intermediate chunk files after concatenation (default True)
+    show_progress : bool
+        Show progress bar (default True)
+    **kwargs
+        Additional arguments passed to process_l2() for each chunk
+
+    Returns
+    -------
+    TimeResolvedDataset
+        Combined dataset with all chunks concatenated along time
+
+    Raises
+    ------
+    FileNotFoundError
+        If no LAZ files found
+    NoDataError
+        If all chunks fail to produce data
+    """
+    import tempfile
+    import shutil
+
+    try:
+        cfg = phase1.load_config(config_path)
+    except Exception as e:
+        raise ConfigurationError(f"Failed to load config from {config_path}: {e}")
+
+    # Discover LAZ files
+    laz_files = phase1.discover_laz_files(cfg.data_folder, start=start, end=end)
+    if not laz_files:
+        raise FileNotFoundError("No matching .laz files found")
+
+    total_files = len(laz_files)
+    total_chunks = (total_files + chunk_size - 1) // chunk_size
+
+    logger.info(
+        "Processing %d LAZ files in %d chunks of up to %d files each",
+        total_files, total_chunks, chunk_size
+    )
+
+    # Set up chunk directory
+    if chunk_dir is None:
+        chunk_dir = Path(tempfile.mkdtemp(prefix="l2_chunks_"))
+        temp_chunk_dir = True
+    else:
+        chunk_dir = Path(chunk_dir)
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        temp_chunk_dir = False
+
+    checkpoint_path = chunk_dir / "chunk_checkpoint.json"
+
+    # Handle resume
+    completed_chunks: set = set()
+    failed_chunks: set = set()
+
+    if resume and checkpoint_path.exists():
+        try:
+            ckpt = ChunkCheckpoint.load(checkpoint_path)
+            # Validate checkpoint matches current run
+            if (ckpt.total_files == total_files and
+                ckpt.chunk_size == chunk_size and
+                ckpt.date_str == (start.strftime("%Y%m%d") if start else "all")):
+                completed_chunks = set(ckpt.completed_chunks)
+                failed_chunks = set(ckpt.failed_chunks)
+                logger.info(
+                    "Resuming from checkpoint: %d/%d chunks completed",
+                    len(completed_chunks), total_chunks
+                )
+            else:
+                logger.warning("Checkpoint doesn't match current run, starting fresh")
+        except Exception as e:
+            logger.warning("Failed to load checkpoint: %s", e)
+
+    # Track base time for proper time offset calculation
+    global_base_time: Optional[datetime] = None
+    chunk_results: List[Tuple[int, Path]] = []
+
+    # Process chunks
+    chunk_iter = range(total_chunks)
+    if show_progress and TQDM_AVAILABLE:
+        chunk_iter = tqdm(chunk_iter, desc="Processing chunks", unit="chunk")
+
+    for chunk_idx in chunk_iter:
+        if chunk_idx in completed_chunks:
+            # Load existing chunk to get its path
+            chunk_path = chunk_dir / f"chunk_{chunk_idx:04d}.nc"
+            if chunk_path.exists():
+                chunk_results.append((chunk_idx, chunk_path))
+                logger.debug("Skipping completed chunk %d", chunk_idx)
+                continue
+            else:
+                # Chunk file missing, need to reprocess
+                completed_chunks.discard(chunk_idx)
+
+        # Get files for this chunk
+        chunk_start_idx = chunk_idx * chunk_size
+        chunk_end_idx = min(chunk_start_idx + chunk_size, total_files)
+        chunk_files = laz_files[chunk_start_idx:chunk_end_idx]
+
+        if not chunk_files:
+            continue
+
+        logger.debug(
+            "Processing chunk %d: files %d-%d (%d files)",
+            chunk_idx, chunk_start_idx, chunk_end_idx - 1, len(chunk_files)
+        )
+
+        # Determine time range for this chunk
+        chunk_file_start = chunk_files[0][1]
+        chunk_file_end = chunk_files[-1][1]
+
+        # Set global base time from first chunk
+        if global_base_time is None:
+            global_base_time = chunk_file_start
+
+        try:
+            # Process this chunk
+            chunk_result = process_l2(
+                config_path,
+                start=chunk_file_start,
+                end=chunk_file_end + timedelta(minutes=5),  # Small buffer
+                show_progress=False,  # Don't show nested progress
+                **kwargs,
+            )
+
+            # Adjust time coordinates relative to global base time
+            time_offset = (chunk_file_start - global_base_time).total_seconds()
+            if time_offset > 0:
+                # Offset the time edges
+                chunk_result.grid.t_edges = chunk_result.grid.t_edges + time_offset
+
+            # Update base_time to global base
+            chunk_result = phase3.TimeResolvedDataset(
+                grid=chunk_result.grid,
+                base_time=global_base_time,
+                profile_config=chunk_result.profile_config,
+                transect_grids=chunk_result.transect_grids,
+                outlier_mask=chunk_result.outlier_mask,
+                Z_filtered=chunk_result.Z_filtered,
+                intensity_contours=chunk_result.intensity_contours,
+            )
+
+            # Save chunk
+            chunk_path = chunk_dir / f"chunk_{chunk_idx:04d}.nc"
+            chunk_result.to_netcdf(chunk_path)
+            chunk_results.append((chunk_idx, chunk_path))
+            completed_chunks.add(chunk_idx)
+
+            logger.debug("Saved chunk %d to %s", chunk_idx, chunk_path)
+
+            # Clear memory
+            del chunk_result
+            clear_memory()
+
+        except (FileNotFoundError, NoDataError) as e:
+            logger.warning("Chunk %d has no data: %s", chunk_idx, e)
+            failed_chunks.add(chunk_idx)
+
+        except Exception as e:
+            logger.error("Chunk %d failed: %s", chunk_idx, e)
+            failed_chunks.add(chunk_idx)
+
+        # Save checkpoint
+        ckpt = ChunkCheckpoint(
+            config_path=str(config_path),
+            date_str=start.strftime("%Y%m%d") if start else "all",
+            output_path=str(output_path) if output_path else "",
+            chunk_dir=str(chunk_dir),
+            chunk_size=chunk_size,
+            total_files=total_files,
+            total_chunks=total_chunks,
+            completed_chunks=list(completed_chunks),
+            failed_chunks=list(failed_chunks),
+            kwargs={k: str(v) if isinstance(v, Path) else v for k, v in kwargs.items()},
+        )
+        ckpt.save(checkpoint_path)
+
+    if not chunk_results:
+        raise NoDataError("All chunks failed to produce data")
+
+    logger.info(
+        "Concatenating %d chunks (%d failed)",
+        len(chunk_results), len(failed_chunks)
+    )
+
+    # Sort chunks by index to ensure correct time ordering
+    chunk_results.sort(key=lambda x: x[0])
+
+    # Load and concatenate chunks
+    combined_ds = _concatenate_l2_chunks([p for _, p in chunk_results])
+
+    # Create final TimeResolvedDataset from combined data
+    from phase2 import TimeResolvedGrid
+
+    # Extract data from combined dataset
+    x_centers = combined_ds.x.values
+    time_seconds = combined_ds.time_seconds.values
+
+    # Reconstruct edges from centers
+    dx = float(combined_ds.attrs.get('dx', np.median(np.diff(x_centers))))
+    dt = float(combined_ds.attrs.get('dt', np.median(np.diff(time_seconds))))
+
+    x_edges = np.concatenate([
+        x_centers - dx/2,
+        [x_centers[-1] + dx/2]
+    ])
+    t_edges = np.concatenate([
+        time_seconds - dt/2,
+        [time_seconds[-1] + dt/2]
+    ])
+
+    # Build TimeResolvedGrid
+    grid = TimeResolvedGrid(
+        x_edges=x_edges,
+        t_edges=t_edges,
+        z_mean=combined_ds.elevation_raw.values.T,  # (n_x, n_t) -> (n_t, n_x)
+        z_min=combined_ds.elevation_min.values.T,
+        z_max=combined_ds.elevation_max.values.T,
+        z_std=combined_ds.elevation_std.values.T,
+        intensity_mean=combined_ds.intensity.values.T,
+        count=combined_ds['count'].values.T,
+    )
+
+    # Get outlier mask if present
+    outlier_mask = None
+    Z_filtered = None
+    if 'outlier_mask' in combined_ds:
+        outlier_mask = combined_ds.outlier_mask.values
+        Z_filtered = combined_ds.elevation.values
+
+    result = phase3.TimeResolvedDataset(
+        grid=grid,
+        base_time=global_base_time,
+        profile_config=None,  # Can't easily preserve across chunks
+        outlier_mask=outlier_mask,
+        Z_filtered=Z_filtered,
+    )
+
+    # Save final output if path provided
+    if output_path is not None:
+        result.to_netcdf(output_path)
+        logger.info("Saved combined result to %s", output_path)
+
+    # Cleanup
+    if cleanup_chunks:
+        if temp_chunk_dir:
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+            logger.debug("Cleaned up temp chunk directory")
+        else:
+            # Just remove chunk files, keep directory
+            for _, chunk_path in chunk_results:
+                try:
+                    chunk_path.unlink()
+                except OSError:
+                    pass
+            try:
+                checkpoint_path.unlink()
+            except OSError:
+                pass
+            logger.debug("Cleaned up chunk files")
+
+    return result
+
+
+def _concatenate_l2_chunks(chunk_paths: List[Path]) -> "phase3.xr.Dataset":
+    """
+    Load and concatenate L2 chunk files along time dimension.
+
+    Parameters
+    ----------
+    chunk_paths : list of Path
+        Paths to chunk NetCDF files in time order
+
+    Returns
+    -------
+    xr.Dataset
+        Combined dataset
+    """
+    import xarray as xr
+
+    datasets = []
+    for path in chunk_paths:
+        ds = xr.open_dataset(path)
+        datasets.append(ds)
+
+    if len(datasets) == 1:
+        return datasets[0]
+
+    # Concatenate along time dimension
+    combined = xr.concat(datasets, dim='time')
+
+    # Close individual datasets to free memory
+    for ds in datasets:
+        ds.close()
+
+    return combined
+
+
 def process_l2_batch(
     config_path: Path,
     start: datetime,

@@ -2,14 +2,20 @@
 """
 Generate runup analysis figures from L2 NetCDF files.
 
+Processes all L2 NetCDF files from config's processFolder/level2/ directory.
+Outputs figures to config's plotFolder/level2/ directory.
+
 This script:
 1. Loads L2 timestack data (Z(x,t), I(x,t))
 2. Computes runup statistics using the runup module
 3. Generates visualization figures
 
 Usage:
-    python scripts/plot_runup.py /path/to/L2_file.nc
-    python scripts/plot_runup.py /path/to/level2/  # Process all NC files in directory
+    # Process ALL L2 files from processFolder/level2/
+    python scripts/visualization/plot_runup.py --config configs/towr_livox_config_20260120.json
+
+    # Process a single file
+    python scripts/visualization/plot_runup.py --config configs/towr_livox_config_20260120.json --input L2_20260120.nc
 """
 import argparse
 import sys
@@ -25,6 +31,7 @@ from scipy import signal
 # Add code directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "code"))
 
+from phase1 import load_config
 import runup
 
 
@@ -516,23 +523,32 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate runup figures from L2 NetCDF files",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "input",
-        type=Path,
-        help="Path to NC file or directory containing NC files"
+        epilog="""
+Examples:
+    # Process ALL L2 files from processFolder/level2/
+    python scripts/visualization/plot_runup.py --config configs/towr_livox_config_20260120.json
+
+    # Process a single file
+    python scripts/visualization/plot_runup.py --config configs/towr_livox_config_20260120.json --input L2_20260120.nc
+        """,
     )
     parser.add_argument(
         "--config", "-c",
         type=Path,
+        required=True,
+        help="Config file (required) - determines input/output directories"
+    )
+    parser.add_argument(
+        "--input", "-i",
+        type=str,
         default=None,
-        help="Config file to determine output directory (uses plot_folder/level2/)"
+        help="Single input filename to process (default: process ALL L2_*.nc files)"
     )
     parser.add_argument(
         "--output-dir", "-o",
         type=Path,
         default=None,
-        help="Output directory for figures (default: config plot_folder/level2/ or figures/l2)"
+        help="Override output directory (default: config's plotFolder/level2/)"
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -542,45 +558,57 @@ def main():
 
     args = parser.parse_args()
 
+    # Load config
+    config = load_config(args.config)
+
+    # Set input directory (processFolder/level2/)
+    input_dir = config.process_folder / "level2"
+    if not input_dir.exists():
+        print(f"Error: Input directory not found: {input_dir}")
+        sys.exit(1)
+
     # Determine output directory
     if args.output_dir is not None:
         output_dir = args.output_dir
-    elif args.config is not None:
-        # Use config's plot_folder with level2/ subfolder
-        from phase1 import load_config
-        config = load_config(args.config)
-        output_dir = config.plot_folder / "level2"
     else:
-        # Fallback: figures/l2 relative to script
-        output_dir = Path(__file__).parent.parent / "figures" / "l2"
-
+        output_dir = config.plot_folder / "level2"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Find NC files
-    input_path = args.input
-    if input_path.is_file():
-        nc_files = [input_path]
-    elif input_path.is_dir():
-        nc_files = sorted(input_path.glob("*.nc"))
+    # Discover L2 files
+    if args.input is not None:
+        # Single file mode
+        nc_path = input_dir / args.input
+        if not nc_path.exists():
+            print(f"Error: Input file not found: {nc_path}")
+            sys.exit(1)
+        nc_files = [nc_path]
     else:
-        print(f"Error: {input_path} not found")
-        sys.exit(1)
+        # Batch mode - find all L2_*.nc files
+        nc_files = sorted(input_dir.glob("L2_*.nc"))
 
     if not nc_files:
-        print(f"No NC files found in {input_path}")
+        print(f"No L2 NetCDF files found in: {input_dir}")
         sys.exit(1)
 
-    print(f"Found {len(nc_files)} NC file(s)")
+    print(f"Found {len(nc_files)} L2 file(s) in: {input_dir}")
     print(f"Output directory: {output_dir}")
 
+    # Process each file
+    success_count = 0
     for nc_path in nc_files:
         try:
             process_runup(nc_path, output_dir, verbose=args.verbose)
+            success_count += 1
         except Exception as e:
             print(f"Error processing {nc_path}: {e}")
             if args.verbose:
                 import traceback
                 traceback.print_exc()
+
+    # Summary
+    print("\n" + "=" * 60)
+    print(f"Processed {success_count}/{len(nc_files)} files successfully")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

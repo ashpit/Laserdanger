@@ -23,11 +23,14 @@ python scripts/processing/run_daily_l1.py --config configs/do_livox_config_20260
 # Process L2 data (wave-resolving)
 python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_20260120.json --start 2026-01-20 --end 2026-01-21
 
-# Visualize L1 output
-python scripts/visualization/visualize_l1.py data/level1/L1_20260112.nc
+# Visualize all L1 outputs
+python scripts/visualization/visualize_l1.py --config configs/do_livox_config_20260112.json
 
 # Create animated GIFs for all L1 files
 python scripts/visualization/gif_nc_l1.py --config configs/do_livox_config_20260112.json
+
+# Visualize all L2 outputs
+python scripts/visualization/visualize_l2.py --config configs/towr_livox_config_20260120.json
 
 # Validate against MATLAB
 python scripts/qc/verify_l1.py python_output.nc matlab_output.mat
@@ -161,12 +164,14 @@ python scripts/qc/verify_l2.py python.nc matlab.mat [-o report.json]
 
 ### Visualization Scripts
 
-All visualization scripts support `--config` to automatically save figures to `plotFolder/level1/` or `plotFolder/level2/`:
+All visualization scripts use `--config` (required) to determine input/output directories.
+They process ALL files by default, or use `--input` for a single file.
 
 ```bash
 # L1 visualization (DEM, stats, profiles) → plotFolder/level1/
-python scripts/visualization/visualize_l1.py L1_file.nc --config CONFIG
-python scripts/visualization/visualize_l1.py L1_file.nc [-o output_dir/]  # or explicit output
+# Processes ALL L1 files from processFolder/level1/ by default
+python scripts/visualization/visualize_l1.py --config CONFIG
+python scripts/visualization/visualize_l1.py --config CONFIG --input L1_20260112.nc  # single file
 
 # Animated L1 GIFs with slope calculation → plotFolder/level1/
 # Processes ALL L1 files from processFolder/level1/ by default
@@ -175,18 +180,23 @@ python scripts/visualization/gif_nc_l1.py --config CONFIG --input L1_20260112.nc
 python scripts/visualization/gif_nc_l1.py --config CONFIG [--fps 2] [--save-slopes]
 
 # L2 visualization (timestacks, intensity, wave detection) → plotFolder/level2/
-python scripts/visualization/visualize_l2.py L2_file.nc --config CONFIG
-python scripts/visualization/visualize_l2.py L2_file.nc [-o output_dir/]  # or explicit output
+# Processes ALL L2 files from processFolder/level2/ by default
+python scripts/visualization/visualize_l2.py --config CONFIG
+python scripts/visualization/visualize_l2.py --config CONFIG --input L2_20260120.nc  # single file
 
 # Runup analysis figures → plotFolder/level2/
-python scripts/visualization/plot_runup.py L2_file.nc --config CONFIG
-python scripts/visualization/plot_runup.py L2_file.nc [-o output_dir/]  # or explicit output
+# Processes ALL L2 files from processFolder/level2/ by default
+python scripts/visualization/plot_runup.py --config CONFIG
+python scripts/visualization/plot_runup.py --config CONFIG --input L2_20260120.nc  # single file
 
 # Publication-style runup timestack → plotFolder/level2/
-python scripts/visualization/plot_runup_timestack.py L2_file.nc --config CONFIG [--t-start 200 --t-end 360]
+# Processes ALL L2 files from processFolder/level2/ by default
+python scripts/visualization/plot_runup_timestack.py --config CONFIG
+python scripts/visualization/plot_runup_timestack.py --config CONFIG --input L2_20260120.nc
+python scripts/visualization/plot_runup_timestack.py --config CONFIG --t-start 200 --t-end 360
 ```
 
-Output path priority: `--output` > `--config` (plotFolder) > fallback (input directory)
+Output path priority: `--output` > `--config` (plotFolder)
 
 ## Configuration
 

@@ -2,10 +2,18 @@
 """
 Visualize L2 (wave-resolving timestack) processing results.
 
+Processes all L2 NetCDF files from config's processFolder/level2/ directory.
+Outputs figures to config's plotFolder/level2/ directory.
+
 Usage:
-    python scripts/visualize_l2.py tests/data/test_l2.nc
-    python scripts/visualize_l2.py tests/data/test_l2.nc -o output_dir/
-    python scripts/visualize_l2.py tests/data/test_l2.nc --show
+    # Process ALL L2 files from processFolder/level2/
+    python scripts/visualization/visualize_l2.py --config configs/towr_livox_config_20260120.json
+
+    # Process a single file
+    python scripts/visualization/visualize_l2.py --config configs/towr_livox_config_20260120.json --input L2_20260120.nc
+
+    # Show plots interactively
+    python scripts/visualization/visualize_l2.py --config configs/towr_livox_config_20260120.json --show
 """
 
 import argparse
@@ -18,6 +26,8 @@ import matplotlib.pyplot as plt
 
 # Add code directory to path for config loading
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "code"))
+
+from phase1 import load_config
 
 
 def load_l2_dataset(path: Path) -> xr.Dataset:
@@ -234,10 +244,10 @@ def plot_wave_detection(ds: xr.Dataset, output_dir: Path, show: bool = False):
     plt.close()
 
 
-def print_summary(ds: xr.Dataset):
+def print_summary(ds: xr.Dataset, filename: str = ""):
     """Print dataset summary."""
     print("=" * 50)
-    print("L2 Dataset Summary")
+    print(f"L2 Dataset Summary: {filename}")
     print("=" * 50)
     print(f"Dimensions: {dict(ds.sizes)}")
     print(f"Grid shape: {ds.sizes['x']} x {ds.sizes['time']} (x × time)")
@@ -250,57 +260,132 @@ def print_summary(ds: xr.Dataset):
     print("=" * 50)
 
 
+def process_single_file(
+    nc_path: Path,
+    output_dir: Path,
+    show: bool = False,
+    no_summary: bool = False,
+) -> bool:
+    """
+    Process a single L2 NetCDF file and generate visualization figures.
+
+    Parameters
+    ----------
+    nc_path : Path
+        Path to the L2 NetCDF file
+    output_dir : Path
+        Output directory for figures
+    show : bool
+        Show plots interactively
+    no_summary : bool
+        Skip printing summary
+
+    Returns
+    -------
+    bool
+        True if successful, False otherwise
+    """
+    try:
+        # Create date-specific output directory
+        date_str = nc_path.stem.replace("L2_", "")[:8]
+        date_output_dir = output_dir / date_str
+        date_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load data
+        print(f"\nLoading: {nc_path.name}")
+        ds = load_l2_dataset(nc_path)
+
+        # Print summary
+        if not no_summary:
+            print_summary(ds, nc_path.name)
+
+        # Generate plots
+        print(f"Generating figures in: {date_output_dir}")
+        plot_timestack(ds, date_output_dir, show)
+        plot_profiles_and_timeseries(ds, date_output_dir, show)
+        plot_intensity(ds, date_output_dir, show)
+        plot_statistics(ds, date_output_dir, show)
+        plot_wave_detection(ds, date_output_dir, show)
+
+        ds.close()
+        return True
+
+    except Exception as e:
+        print(f"Error processing {nc_path.name}: {e}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Visualize L2 wave-resolving timestack results",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    # Process ALL L2 files from processFolder/level2/
+    python scripts/visualization/visualize_l2.py --config configs/towr_livox_config_20260120.json
+
+    # Process a single file
+    python scripts/visualization/visualize_l2.py --config configs/towr_livox_config_20260120.json --input L2_20260120.nc
+        """,
     )
-    parser.add_argument("input", type=Path, help="Input L2 NetCDF file")
-    parser.add_argument("-c", "--config", type=Path, default=None,
-                        help="Config file to determine output directory (uses plot_folder/level2/)")
+    parser.add_argument("-c", "--config", type=Path, required=True,
+                        help="Config file (required) - determines input/output directories")
+    parser.add_argument("-i", "--input", type=str, default=None,
+                        help="Single input filename to process (default: process ALL L2_*.nc files)")
     parser.add_argument("-o", "--output", type=Path, default=None,
-                        help="Output directory for figures (default: config plot_folder/level2/ or input dir)")
+                        help="Override output directory (default: config's plotFolder/level2/)")
     parser.add_argument("--show", action="store_true", help="Show plots interactively")
     parser.add_argument("--no-summary", action="store_true", help="Skip printing summary")
 
     args = parser.parse_args()
 
-    if not args.input.exists():
-        print(f"Error: Input file not found: {args.input}")
+    # Load config
+    config = load_config(args.config)
+
+    # Set input directory (processFolder/level2/)
+    input_dir = config.process_folder / "level2"
+    if not input_dir.exists():
+        print(f"Error: Input directory not found: {input_dir}")
         return 1
 
     # Set output directory
     if args.output is not None:
         output_dir = args.output
-    elif args.config is not None:
-        # Use config's plot_folder with level2/ subfolder
-        from phase1 import load_config
-        config = load_config(args.config)
-        output_dir = config.plot_folder / "level2"
     else:
-        # Fallback: figures/ subdirectory in input dir
-        output_dir = args.input.parent / "figures"
+        output_dir = config.plot_folder / "level2"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load data
-    print(f"Loading: {args.input}")
-    ds = load_l2_dataset(args.input)
+    # Discover L2 files
+    if args.input is not None:
+        # Single file mode
+        nc_path = input_dir / args.input
+        if not nc_path.exists():
+            print(f"Error: Input file not found: {nc_path}")
+            return 1
+        nc_files = [nc_path]
+    else:
+        # Batch mode - find all L2_*.nc files
+        nc_files = sorted(input_dir.glob("L2_*.nc"))
 
-    # Print summary
-    if not args.no_summary:
-        print_summary(ds)
+    if not nc_files:
+        print(f"No L2 NetCDF files found in: {input_dir}")
+        return 1
 
-    # Generate plots
-    print(f"\nGenerating figures in: {output_dir}")
-    plot_timestack(ds, output_dir, args.show)
-    plot_profiles_and_timeseries(ds, output_dir, args.show)
-    plot_intensity(ds, output_dir, args.show)
-    plot_statistics(ds, output_dir, args.show)
-    plot_wave_detection(ds, output_dir, args.show)
+    print(f"Found {len(nc_files)} L2 file(s) in: {input_dir}")
+    print(f"Output directory: {output_dir}")
 
-    ds.close()
-    print("\nDone!")
-    return 0
+    # Process each file
+    success_count = 0
+    for nc_path in nc_files:
+        if process_single_file(nc_path, output_dir, args.show, args.no_summary):
+            success_count += 1
+
+    # Summary
+    print("\n" + "=" * 50)
+    print(f"Processed {success_count}/{len(nc_files)} files successfully")
+    print("=" * 50)
+
+    return 0 if success_count == len(nc_files) else 1
 
 
 if __name__ == "__main__":

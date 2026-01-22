@@ -2,10 +2,18 @@
 """
 Visualize L1 (beach surface DEM) processing results.
 
+Processes all L1 NetCDF files from config's processFolder/level1/ directory.
+Outputs figures to config's plotFolder/level1/ directory.
+
 Usage:
-    python scripts/visualize_l1.py tests/data/test_l1.nc
-    python scripts/visualize_l1.py tests/data/test_l1.nc -o output_dir/
-    python scripts/visualize_l1.py tests/data/test_l1.nc --show
+    # Process ALL L1 files from processFolder/level1/
+    python scripts/visualization/visualize_l1.py --config configs/do_livox_config_20260112.json
+
+    # Process a single file
+    python scripts/visualization/visualize_l1.py --config configs/do_livox_config_20260112.json --input L1_20260112.nc
+
+    # Show plots interactively
+    python scripts/visualization/visualize_l1.py --config configs/do_livox_config_20260112.json --show
 """
 
 import argparse
@@ -18,6 +26,8 @@ import matplotlib.pyplot as plt
 
 # Add code directory to path for config loading
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "code"))
+
+from phase1 import load_config
 
 
 def load_l1_dataset(path: Path) -> xr.Dataset:
@@ -181,10 +191,10 @@ def plot_elevation_histogram(ds: xr.Dataset, output_dir: Path, show: bool = Fals
     plt.close()
 
 
-def print_summary(ds: xr.Dataset):
+def print_summary(ds: xr.Dataset, filename: str = ""):
     """Print dataset summary."""
     print("=" * 50)
-    print("L1 Dataset Summary")
+    print(f"L1 Dataset Summary: {filename}")
     print("=" * 50)
     print(f"Dimensions: {dict(ds.sizes)}")
     print(f"Time steps: {ds.sizes['time']}")
@@ -196,56 +206,131 @@ def print_summary(ds: xr.Dataset):
     print("=" * 50)
 
 
+def process_single_file(
+    nc_path: Path,
+    output_dir: Path,
+    show: bool = False,
+    no_summary: bool = False,
+) -> bool:
+    """
+    Process a single L1 NetCDF file and generate visualization figures.
+
+    Parameters
+    ----------
+    nc_path : Path
+        Path to the L1 NetCDF file
+    output_dir : Path
+        Output directory for figures
+    show : bool
+        Show plots interactively
+    no_summary : bool
+        Skip printing summary
+
+    Returns
+    -------
+    bool
+        True if successful, False otherwise
+    """
+    try:
+        # Create date-specific output directory
+        date_str = nc_path.stem.replace("L1_", "")[:8]
+        date_output_dir = output_dir / date_str
+        date_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load data
+        print(f"\nLoading: {nc_path.name}")
+        ds = load_l1_dataset(nc_path)
+
+        # Print summary
+        if not no_summary:
+            print_summary(ds, nc_path.name)
+
+        # Generate plots
+        print(f"Generating figures in: {date_output_dir}")
+        plot_dem_timesteps(ds, date_output_dir, show)
+        plot_statistics(ds, date_output_dir, show)
+        plot_profiles(ds, date_output_dir, show)
+        plot_elevation_histogram(ds, date_output_dir, show)
+
+        ds.close()
+        return True
+
+    except Exception as e:
+        print(f"Error processing {nc_path.name}: {e}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Visualize L1 beach surface DEM results",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    # Process ALL L1 files from processFolder/level1/
+    python scripts/visualization/visualize_l1.py --config configs/do_livox_config_20260112.json
+
+    # Process a single file
+    python scripts/visualization/visualize_l1.py --config configs/do_livox_config_20260112.json --input L1_20260112.nc
+        """,
     )
-    parser.add_argument("input", type=Path, help="Input L1 NetCDF file")
-    parser.add_argument("-c", "--config", type=Path, default=None,
-                        help="Config file to determine output directory (uses plot_folder/level1/)")
+    parser.add_argument("-c", "--config", type=Path, required=True,
+                        help="Config file (required) - determines input/output directories")
+    parser.add_argument("-i", "--input", type=str, default=None,
+                        help="Single input filename to process (default: process ALL L1_*.nc files)")
     parser.add_argument("-o", "--output", type=Path, default=None,
-                        help="Output directory for figures (default: config plot_folder/level1/ or input dir)")
+                        help="Override output directory (default: config's plotFolder/level1/)")
     parser.add_argument("--show", action="store_true", help="Show plots interactively")
     parser.add_argument("--no-summary", action="store_true", help="Skip printing summary")
 
     args = parser.parse_args()
 
-    if not args.input.exists():
-        print(f"Error: Input file not found: {args.input}")
+    # Load config
+    config = load_config(args.config)
+
+    # Set input directory (processFolder/level1/)
+    input_dir = config.process_folder / "level1"
+    if not input_dir.exists():
+        print(f"Error: Input directory not found: {input_dir}")
         return 1
 
     # Set output directory
     if args.output is not None:
         output_dir = args.output
-    elif args.config is not None:
-        # Use config's plot_folder with level1/ subfolder
-        from phase1 import load_config
-        config = load_config(args.config)
-        output_dir = config.plot_folder / "level1"
     else:
-        # Fallback: figures/ subdirectory in input dir
-        output_dir = args.input.parent / "figures"
+        output_dir = config.plot_folder / "level1"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load data
-    print(f"Loading: {args.input}")
-    ds = load_l1_dataset(args.input)
+    # Discover L1 files
+    if args.input is not None:
+        # Single file mode
+        nc_path = input_dir / args.input
+        if not nc_path.exists():
+            print(f"Error: Input file not found: {nc_path}")
+            return 1
+        nc_files = [nc_path]
+    else:
+        # Batch mode - find all L1_*.nc files
+        nc_files = sorted(input_dir.glob("L1_*.nc"))
 
-    # Print summary
-    if not args.no_summary:
-        print_summary(ds)
+    if not nc_files:
+        print(f"No L1 NetCDF files found in: {input_dir}")
+        return 1
 
-    # Generate plots
-    print(f"\nGenerating figures in: {output_dir}")
-    plot_dem_timesteps(ds, output_dir, args.show)
-    plot_statistics(ds, output_dir, args.show)
-    plot_profiles(ds, output_dir, args.show)
-    plot_elevation_histogram(ds, output_dir, args.show)
+    print(f"Found {len(nc_files)} L1 file(s) in: {input_dir}")
+    print(f"Output directory: {output_dir}")
 
-    ds.close()
-    print("\nDone!")
-    return 0
+    # Process each file
+    success_count = 0
+    for nc_path in nc_files:
+        if process_single_file(nc_path, output_dir, args.show, args.no_summary):
+            success_count += 1
+
+    # Summary
+    print("\n" + "=" * 50)
+    print(f"Processed {success_count}/{len(nc_files)} files successfully")
+    print("=" * 50)
+
+    return 0 if success_count == len(nc_files) else 1
 
 
 if __name__ == "__main__":

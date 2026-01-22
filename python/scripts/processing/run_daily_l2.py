@@ -30,6 +30,123 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "code"))
 import phase1
 import phase4
 
+# Try to import tqdm for progress bars
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
+
+
+def _process_l2_batch_chunked(
+    config_path: Path,
+    start_date: datetime,
+    end_date: datetime,
+    output_dir: Path,
+    chunk_size: int,
+    chunk_dir: Path = None,
+    cleanup_chunks: bool = True,
+    resume: bool = False,
+    show_progress: bool = True,
+    **kwargs,
+) -> phase4.BatchProgress:
+    """
+    Process L2 data day-by-day using chunked processing for each day.
+
+    This wrapper iterates over days and uses process_l2_chunked() for each,
+    which handles memory-efficient chunk-based processing within each day.
+    """
+    logger = logging.getLogger(__name__)
+
+    # Generate list of days to process
+    days_to_process = []
+    current = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    while current < end_date:
+        days_to_process.append(current)
+        current += timedelta(days=1)
+
+    # Check for existing outputs (for resume)
+    completed_days = set()
+    if resume:
+        for day in days_to_process:
+            output_file = output_dir / f"L2_{day.strftime('%Y%m%d')}.nc"
+            if output_file.exists():
+                completed_days.add(day.strftime("%Y-%m-%d"))
+                logger.info("Skipping completed day: %s", day.strftime("%Y-%m-%d"))
+
+    remaining_days = [d for d in days_to_process if d.strftime("%Y-%m-%d") not in completed_days]
+
+    progress = phase4.BatchProgress(total_items=len(days_to_process))
+    progress.completed = len(completed_days)
+
+    if not remaining_days:
+        logger.info("All days already processed")
+        return progress
+
+    logger.info(
+        "Processing %d days with chunked processing (%d already completed)",
+        len(remaining_days), len(completed_days)
+    )
+
+    # Process each day
+    day_iter = remaining_days
+    if show_progress and TQDM_AVAILABLE:
+        day_iter = tqdm(remaining_days, desc="Processing days (chunked)", unit="day")
+
+    for day in day_iter:
+        day_str = day.strftime("%Y-%m-%d")
+        day_end = day + timedelta(days=1)
+        progress.current_item = day_str
+
+        # Set up chunk directory for this day
+        if chunk_dir is not None:
+            day_chunk_dir = chunk_dir / day.strftime("%Y%m%d")
+        else:
+            day_chunk_dir = None  # Will use temp dir
+
+        output_file = output_dir / f"L2_{day.strftime('%Y%m%d')}.nc"
+
+        try:
+            result = phase4.process_l2_chunked(
+                config_path,
+                start=day,
+                end=day_end,
+                chunk_size=chunk_size,
+                output_path=output_file,
+                chunk_dir=day_chunk_dir,
+                resume=resume,
+                cleanup_chunks=cleanup_chunks,
+                show_progress=False,  # Don't show nested progress
+                **kwargs,
+            )
+
+            progress.completed += 1
+            completed_days.add(day_str)
+            logger.info("Completed %s", day_str)
+
+            # Clear memory between days
+            del result
+            phase4.clear_memory()
+
+        except (FileNotFoundError, phase4.NoDataError) as e:
+            progress.failed += 1
+            progress.errors.append((day_str, f"No data: {e}"))
+            logger.warning("No data for %s: %s", day_str, e)
+
+        except Exception as e:
+            progress.failed += 1
+            progress.errors.append((day_str, f"Error: {e}"))
+            logger.error("Error processing %s: %s", day_str, e)
+
+    logger.info(
+        "Chunked batch complete: %d succeeded, %d failed, %.1f%% success rate",
+        progress.completed, progress.failed, progress.success_rate * 100
+    )
+
+    return progress
+
 
 def discover_date_range(data_folder: Path) -> tuple[datetime, datetime]:
     """
@@ -118,6 +235,19 @@ Examples:
         "--no-progress", action="store_true",
         help="Disable progress bars"
     )
+    parser.add_argument(
+        "--chunk-size", type=int, default=None,
+        help="Process LAZ files in chunks of this size to reduce memory usage. "
+             "Recommended: 8-10 for large datasets. If not set, loads all files at once."
+    )
+    parser.add_argument(
+        "--chunk-dir", type=Path, default=None,
+        help="Directory for intermediate chunk files (default: temp directory)"
+    )
+    parser.add_argument(
+        "--keep-chunks", action="store_true",
+        help="Keep intermediate chunk files after processing (for debugging)"
+    )
 
     args = parser.parse_args()
 
@@ -188,20 +318,40 @@ Examples:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        progress = phase4.process_l2_batch(
-            config_path,
-            start=start_date,
-            end=end_date,
-            output_dir=output_dir,
-            file_duration=timedelta(days=1),  # One file per day
-            resume=args.resume,
-            show_progress=not args.no_progress,
-            time_bin_size=args.time_bin,
-            x_bin_size=args.x_bin,
-            multi_transect=args.multi_transect,
-            apply_outlier_detection=args.outlier_detection,
-            skip_corrupt=True,
-        )
+        if args.chunk_size is not None:
+            # Use chunked processing for memory efficiency
+            logger.info("Using chunked processing with chunk_size=%d", args.chunk_size)
+            progress = _process_l2_batch_chunked(
+                config_path=config_path,
+                start_date=start_date,
+                end_date=end_date,
+                output_dir=output_dir,
+                chunk_size=args.chunk_size,
+                chunk_dir=args.chunk_dir,
+                cleanup_chunks=not args.keep_chunks,
+                resume=args.resume,
+                show_progress=not args.no_progress,
+                time_bin_size=args.time_bin,
+                x_bin_size=args.x_bin,
+                multi_transect=args.multi_transect,
+                apply_outlier_detection=args.outlier_detection,
+            )
+        else:
+            # Standard batch processing (loads all files per day at once)
+            progress = phase4.process_l2_batch(
+                config_path,
+                start=start_date,
+                end=end_date,
+                output_dir=output_dir,
+                file_duration=timedelta(days=1),  # One file per day
+                resume=args.resume,
+                show_progress=not args.no_progress,
+                time_bin_size=args.time_bin,
+                x_bin_size=args.x_bin,
+                multi_transect=args.multi_transect,
+                apply_outlier_detection=args.outlier_detection,
+                skip_corrupt=True,
+            )
 
         print(f"\nProcessing complete:")
         print(f"  Succeeded: {progress.completed}")
