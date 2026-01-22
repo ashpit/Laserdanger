@@ -22,6 +22,7 @@ This document tracks the conversion of the MATLAB lidar processing pipeline to P
 | Validation Infrastructure (Phase 9) | Complete | 36 tests |
 | Documentation (Phase 10) | Complete | - |
 | Performance Optimizations (Phase 11) | Complete | - |
+| QC & Visualization (Phase 12) | Complete | - |
 | **Total Test Coverage** | | **186 tests passing** |
 
 ---
@@ -152,6 +153,10 @@ This document tracks the conversion of the MATLAB lidar processing pipeline to P
 - [x] `--bin-size`, `--mode-bin` parameters
 - [x] `--verbose` flag with proper logging
 - [x] Progress bar for long operations (tqdm)
+- [x] Scripts organized into subdirectories:
+  - `scripts/processing/` - L1/L2 batch processing
+  - `scripts/qc/` - Quality control and validation
+  - `scripts/visualization/` - Figure generation
 
 ---
 
@@ -324,8 +329,8 @@ This document tracks the conversion of the MATLAB lidar processing pipeline to P
 
 ### 9.1 MATLAB Comparison ✅ COMPLETED
 - [x] Complete verification scripts
-  - `scripts/verify_l1.py` - L1 output comparison
-  - `scripts/verify_l2.py` - L2 output comparison
+  - `scripts/qc/verify_l1.py` - L1 output comparison
+  - `scripts/qc/verify_l2.py` - L2 output comparison
 - [x] Quantitative comparison utilities in `code/validation.py`
   - `compute_rmse()`, `compute_correlation()`, `compute_bias()`
   - `compare_arrays()`, `compare_l1_outputs()`, `compare_l2_outputs()`
@@ -407,6 +412,53 @@ This document tracks the conversion of the MATLAB lidar processing pipeline to P
 
 ---
 
+## Phase 12: QC & Visualization Infrastructure ✅ COMPLETED
+
+### 12.1 Quality Control Scripts ✅ COMPLETED
+- [x] `scripts/qc/qc_level1.py` - Comprehensive L1 diagnostics
+  - Config-driven (requires `--config`)
+  - Generates figures to `plotFolder/qc/level1/`
+  - Date-specific subdirectories for figures
+  - JSON QC report generation
+  - Coverage, statistics, and anomaly detection
+- [x] `scripts/qc/qc_level2.py` - Comprehensive L2 diagnostics
+  - Config-driven (requires `--config`)
+  - Generates figures to `plotFolder/qc/level2/`
+  - Timestack quality metrics
+  - Runup detection validation
+
+### 12.2 Visualization Scripts ✅ COMPLETED
+- [x] Config-driven output paths for all visualization scripts
+  - All scripts support `--config` flag
+  - Output path priority: `--output` > `--config` (plotFolder) > fallback
+- [x] `scripts/visualization/visualize_l1.py` → `plotFolder/level1/`
+- [x] `scripts/visualization/visualize_l2.py` → `plotFolder/level2/`
+- [x] `scripts/visualization/gif_nc_l1.py` → `plotFolder/level1/`
+- [x] `scripts/visualization/plot_runup.py` → `plotFolder/level2/`
+- [x] `scripts/visualization/plot_runup_timestack.py` → `plotFolder/level2/`
+
+### 12.3 Output Directory Structure
+```
+processFolder/                  # NetCDF data outputs
+├── level1/
+│   └── L1_YYYYMMDD.nc
+└── level2/
+    └── L2_YYYYMMDD.nc
+
+plotFolder/                     # Figures and QC reports
+├── level1/                    # L1 visualization outputs
+├── level2/                    # L2 visualization outputs
+└── qc/
+    ├── level1/                # L1 QC diagnostics
+    │   ├── qc_report.json
+    │   └── YYYYMMDD/          # Date-specific figures
+    └── level2/                # L2 QC diagnostics
+        ├── qc_report.json
+        └── YYYYMMDD/          # Date-specific figures
+```
+
+---
+
 ## Quick Reference: MATLAB → Python Mapping
 
 | MATLAB Function | Python Function | Status |
@@ -442,18 +494,32 @@ This document tracks the conversion of the MATLAB lidar processing pipeline to P
    pip install lazrs
 
    # Run L1 batch processing
-   python scripts/run_daily_l1.py --config ../livox_config.json --verbose
+   python scripts/processing/run_daily_l1.py --config configs/do_livox_config_20260112.json --verbose
+
+   # Run L2 batch processing
+   python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_20260120.json --verbose
    ```
 
-2. **Validate against MATLAB outputs** (Phase 9.2)
-   - Side-by-side comparison with known good MATLAB results
-   - Performance benchmarking with optimizations enabled
+2. **Run QC on processed data**
+   ```bash
+   # L1 QC (outputs to plotFolder/qc/level1/)
+   python scripts/qc/qc_level1.py --config configs/do_livox_config_20260112.json
 
-3. **Implement parallel file loading** (Phase 11.4)
+   # L2 QC (outputs to plotFolder/qc/level2/)
+   python scripts/qc/qc_level2.py --config configs/towr_livox_config_20260120.json
+   ```
+
+3. **Validate against MATLAB outputs** (Phase 9.2)
+   ```bash
+   python scripts/qc/verify_l1.py python_output.nc matlab_output.mat
+   python scripts/qc/verify_l2.py python_output.nc matlab_output.mat
+   ```
+
+4. **Implement parallel file loading** (Phase 11.4)
    - Add `--parallel N` flag to use multiple workers
    - Target: 2-4x speedup on multi-core systems
 
-4. **Add `--fast` mode** (Phase 11.4)
+5. **Add `--fast` mode** (Phase 11.4)
    - Skip residual kernel filtering for quick previews
    - Useful for initial data exploration
 
