@@ -31,7 +31,7 @@ Options:
     --x-max FLOAT       Max cross-shore distance for slope fit in meters (default: 20)
     --no-colorbar       Disable colorbar
     --no-profile        Disable profile panel (single panel DEM only)
-    --save-slopes       Save slopes to NetCDF file
+    --save-slopes       Save slopes to JSON file (in processFolder/slopes/)
 
 Examples:
     # Process all L1 files in processFolder/level1/
@@ -685,52 +685,63 @@ def create_gif(
     return slopes, times, y_pos
 
 
-def save_slopes_to_nc(
+def save_slopes_to_json(
     slopes: np.ndarray,
     times: np.ndarray,
     y_pos: float,
     x_max_relative: float,
-    output_path: Path
+    output_path: Path,
+    source_file: str,
 ) -> None:
-    """Save slope timeseries to NetCDF file."""
+    """Save slope timeseries to JSON file."""
+    import json
+
     # Convert slopes to angles
     angles = np.degrees(np.arctan(slopes))
 
-    # Create xarray dataset
-    ds_out = xr.Dataset(
-        {
-            'slope': (['time'], slopes, {
-                'units': 'dimensionless',
-                'long_name': 'Foreshore slope (tan beta)',
-                'description': 'Beach foreshore slope dz/dx',
-            }),
-            'slope_angle': (['time'], angles, {
-                'units': 'degrees',
-                'long_name': 'Foreshore slope angle',
-                'description': 'Beach foreshore slope in degrees',
-            }),
-        },
-        coords={
-            'time': times,
-        },
-        attrs={
+    # Convert numpy datetime64 to ISO strings
+    time_strings = [np.datetime_as_string(t, unit='s') for t in times]
+
+    # Build JSON structure
+    data = {
+        'metadata': {
             'title': 'L1 Beach Foreshore Slope Timeseries',
             'description': 'Foreshore slopes calculated for Stockdon runup',
-            'y_position_m': y_pos,
-            'x_max_relative_m': x_max_relative,
+            'source_file': source_file,
+            'y_position_m': float(y_pos),
+            'x_max_relative_m': float(x_max_relative),
             'slope_method': 'Theil-Sen robust regression',
             'created_by': 'gif_nc_l1.py',
-        }
-    )
+        },
+        'statistics': {
+            'mean_slope': float(np.nanmean(slopes)),
+            'std_slope': float(np.nanstd(slopes)),
+            'min_slope': float(np.nanmin(slopes)),
+            'max_slope': float(np.nanmax(slopes)),
+            'mean_angle_deg': float(np.nanmean(angles)),
+            'n_valid': int(np.sum(~np.isnan(slopes))),
+            'n_total': len(slopes),
+        },
+        'timeseries': [
+            {
+                'time': t,
+                'slope': float(s) if not np.isnan(s) else None,
+                'angle_deg': float(a) if not np.isnan(a) else None,
+            }
+            for t, s, a in zip(time_strings, slopes, angles)
+        ],
+    }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    ds_out.to_netcdf(output_path)
+    with open(output_path, 'w') as f:
+        json.dump(data, f, indent=2)
     print(f'Saved slopes to: {output_path}')
 
 
 def process_single_file(
     nc_path: Path,
     output_path: Path,
+    slopes_dir: Path,
     args,
 ) -> bool:
     """
@@ -786,8 +797,8 @@ def process_single_file(
 
         # Save slopes if requested
         if args.save_slopes:
-            slopes_path = output_path.parent / (nc_path.stem + '_slopes.nc')
-            save_slopes_to_nc(slopes, times, y_pos, args.x_max, slopes_path)
+            slopes_path = slopes_dir / (nc_path.stem + '_slopes.json')
+            save_slopes_to_json(slopes, times, y_pos, args.x_max, slopes_path, nc_path.name)
 
         ds.close()
         return True
@@ -912,7 +923,7 @@ Examples:
     parser.add_argument(
         "--save-slopes",
         action="store_true",
-        help="Save slope timeseries to NetCDF file"
+        help="Save slope timeseries to JSON file (in processFolder/slopes/)"
     )
     parser.add_argument(
         "--metadata-only",
@@ -972,9 +983,16 @@ Examples:
             print(f"No L1 NetCDF files found in: {input_dir}", file=sys.stderr)
             sys.exit(1)
 
+    # Slopes output directory (processFolder/slopes/)
+    slopes_dir = config.process_folder / "slopes"
+    if args.save_slopes:
+        slopes_dir.mkdir(parents=True, exist_ok=True)
+
     print(f"Found {len(nc_files)} L1 file(s) to process")
     print(f"Input directory: {input_dir}")
     print(f"Output directory: {output_dir}")
+    if args.save_slopes:
+        print(f"Slopes directory: {slopes_dir}")
 
     # Process each file
     success_count = 0
@@ -982,7 +1000,7 @@ Examples:
 
     for nc_path in nc_files:
         output_path = output_dir / nc_path.with_suffix('.gif').name
-        if process_single_file(nc_path, output_path, args):
+        if process_single_file(nc_path, output_path, slopes_dir, args):
             success_count += 1
         else:
             fail_count += 1
@@ -995,6 +1013,8 @@ Examples:
     if fail_count > 0:
         print(f"  Failed: {fail_count} files")
     print(f"  Output directory: {output_dir}")
+    if args.save_slopes:
+        print(f"  Slopes directory: {slopes_dir}")
     print("\nDone!")
 
 
