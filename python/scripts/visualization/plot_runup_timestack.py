@@ -3,21 +3,27 @@
 Plot runup timestack figures similar to published wave runup visualizations.
 
 Processes all L2 NetCDF files from config's processFolder/level2/ directory.
-Outputs figures to config's plotFolder/level2/ directory.
+Outputs figures to config's plotFolder/level2/YYYYMMDD/ directory.
 
-Creates two-panel figures:
+For each daily L2 file, generates multiple figures - one per 30-minute window.
+Each figure shows 1800s (30 min) on the x-axis with two panels:
   (a) Intensity timestack with runup line overlay
   (b) Water level "score" with runup line overlay
 
+Output filenames include the window start time (HHMM format):
+  L2_20260120_runup_timestack_0800.png  (08:00-08:30 window)
+  L2_20260120_runup_timestack_0830.png  (08:30-09:00 window)
+  ...
+
 Usage:
-    # Process ALL L2 files from processFolder/level2/
+    # Process ALL L2 files (generates 30-min window figures for each)
     python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json
 
     # Process a single file
     python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --input L2_20260120.nc
 
-    # With time window
-    python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --t-start 200 --t-end 360
+    # Use 1-hour windows instead of 30-min
+    python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --window 3600
 """
 import argparse
 from pathlib import Path
@@ -370,17 +376,37 @@ def print_runup_stats(runup_data: dict, title: str = None):
 def process_single_file(
     nc_path: Path,
     output_dir: Path,
-    t_start: float = None,
-    t_end: float = None,
     threshold: float = None,
-    title: str = None,
     single_panel: bool = False,
     show: bool = False,
     dpi: int = 150,
     no_stats: bool = False,
+    window_seconds: float = 1800.0,
 ) -> bool:
     """
     Process a single L2 NetCDF file and generate runup timestack figures.
+
+    Splits the data into 30-minute (1800s) windows and creates one figure per window.
+    Each figure shows 1800s on the x-axis with the runup line overlay.
+
+    Parameters
+    ----------
+    nc_path : Path
+        Path to the L2 NetCDF file
+    output_dir : Path
+        Output directory for figures
+    threshold : float, optional
+        Runup detection threshold (auto-detected if None)
+    single_panel : bool
+        Create single-panel intensity plot only
+    show : bool
+        Show plots interactively
+    dpi : int
+        Output resolution
+    no_stats : bool
+        Don't print runup statistics
+    window_seconds : float
+        Window size in seconds (default: 1800 = 30 minutes)
 
     Returns True if successful, False otherwise.
     """
@@ -394,42 +420,100 @@ def process_single_file(
         date_output_dir = output_dir / date_str
         date_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate filename
         stem = nc_path.stem
-        if t_start is not None or t_end is not None:
-            t_str = f"_t{t_start or 0:.0f}-{t_end or 'end'}"
-        else:
-            t_str = ""
 
-        # Use date as title if not specified
-        file_title = title if title else f"L2 Runup: {date_str}"
+        # Get time arrays
+        time_seconds = ds.time_seconds.values
+        time_datetime = ds.time.values
 
-        # Plot
-        if single_panel:
-            output_path = date_output_dir / f"{stem}_runup_intensity{t_str}.png"
-            plot_intensity_only(
-                ds, output_path,
-                t_start=t_start, t_end=t_end,
-                threshold=threshold,
-                title=file_title,
-                show=show,
-                dpi=dpi,
-            )
-        else:
-            output_path = date_output_dir / f"{stem}_runup_timestack{t_str}.png"
-            runup_data = plot_runup_timestack(
-                ds, output_path,
-                t_start=t_start, t_end=t_end,
-                threshold=threshold,
-                title=file_title,
-                show=show,
-                dpi=dpi,
-            )
+        # Calculate window boundaries
+        t_min = time_seconds[0]
+        t_max = time_seconds[-1]
+        total_duration = t_max - t_min
 
-            if not no_stats:
-                print_runup_stats(runup_data, title=file_title)
+        # Generate windows
+        window_starts = np.arange(t_min, t_max, window_seconds)
+        n_windows = len(window_starts)
+
+        print(f"  Total duration: {total_duration:.0f}s ({total_duration/3600:.1f} hours)")
+        print(f"  Generating {n_windows} figures ({window_seconds/60:.0f}-min windows)")
+
+        figure_count = 0
+        for i, w_start in enumerate(window_starts):
+            w_end = w_start + window_seconds
+
+            # Find time indices for this window
+            t_mask = (time_seconds >= w_start) & (time_seconds < w_end)
+            if t_mask.sum() < 10:
+                print(f"    Window {i+1}/{n_windows}: Skipping (insufficient data)")
+                continue
+
+            # Get the datetime at window start for filename
+            window_start_idx = np.where(t_mask)[0][0]
+            window_datetime = time_datetime[window_start_idx]
+
+            # Convert numpy datetime64 to string for filename (HHMM format)
+            dt_str = str(window_datetime)
+            # Extract time portion - format is like "2026-01-20T08:30:00.000000000"
+            if 'T' in dt_str:
+                time_part = dt_str.split('T')[1][:5].replace(':', '')  # "0830"
+            else:
+                # Fallback: use seconds offset
+                time_part = f"{int(w_start):06d}"
+
+            # Create title with time range
+            if 'T' in dt_str:
+                time_display = dt_str.split('T')[1][:5]  # "08:30"
+                end_display_seconds = w_start + window_seconds
+                end_idx = np.searchsorted(time_seconds, end_display_seconds)
+                if end_idx < len(time_datetime):
+                    end_dt_str = str(time_datetime[min(end_idx, len(time_datetime)-1)])
+                    if 'T' in end_dt_str:
+                        end_time_display = end_dt_str.split('T')[1][:5]
+                    else:
+                        end_time_display = f"{time_display}+30m"
+                else:
+                    end_time_display = f"{time_display}+30m"
+                window_title = f"{date_str} {time_display}-{end_time_display}"
+            else:
+                window_title = f"{date_str} t={w_start:.0f}-{w_end:.0f}s"
+
+            # Generate filename based on window start time
+            if single_panel:
+                output_path = date_output_dir / f"{stem}_runup_intensity_{time_part}.png"
+            else:
+                output_path = date_output_dir / f"{stem}_runup_timestack_{time_part}.png"
+
+            print(f"    Window {i+1}/{n_windows}: {window_title}")
+
+            # Plot this window
+            if single_panel:
+                plot_intensity_only(
+                    ds, output_path,
+                    t_start=w_start, t_end=w_end,
+                    threshold=threshold,
+                    title=window_title,
+                    show=show,
+                    dpi=dpi,
+                )
+            else:
+                runup_data = plot_runup_timestack(
+                    ds, output_path,
+                    t_start=w_start, t_end=w_end,
+                    threshold=threshold,
+                    title=window_title,
+                    show=show,
+                    dpi=dpi,
+                )
+
+                if not no_stats and i == 0:
+                    # Only print stats for first window to avoid spam
+                    print_runup_stats(runup_data, title=window_title)
+
+            figure_count += 1
 
         ds.close()
+        print(f"  Generated {figure_count} figures for {nc_path.name}")
         return True
 
     except Exception as e:
@@ -445,14 +529,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Process ALL L2 files from processFolder/level2/
+    # Process ALL L2 files (generates 30-min window figures for each)
     python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json
 
     # Process a single file
     python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --input L2_20260120.nc
 
-    # With time window
-    python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --t-start 200 --t-end 360
+    # Use 1-hour windows instead of 30-min
+    python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --window 3600
         """
     )
     parser.add_argument("-c", "--config", type=Path, required=True,
@@ -461,14 +545,10 @@ Examples:
                         help="Single input filename to process (default: process ALL L2_*.nc files)")
     parser.add_argument("-o", "--output-dir", type=Path, default=None,
                         help="Override output directory (default: config's plotFolder/level2/)")
-    parser.add_argument("--t-start", type=float, default=None,
-                        help="Start time in seconds")
-    parser.add_argument("--t-end", type=float, default=None,
-                        help="End time in seconds")
+    parser.add_argument("--window", type=float, default=1800.0,
+                        help="Window size in seconds (default: 1800 = 30 minutes)")
     parser.add_argument("--threshold", type=float, default=None,
                         help="Runup detection threshold in meters (default: auto-detect)")
-    parser.add_argument("--title", type=str, default=None,
-                        help="Figure title (default: auto-generated from date)")
     parser.add_argument("--single-panel", action="store_true",
                         help="Create single-panel intensity plot only")
     parser.add_argument("--show", action="store_true",
@@ -514,19 +594,19 @@ Examples:
 
     print(f"Found {len(nc_files)} L2 file(s) in: {input_dir}")
     print(f"Output directory: {output_dir}")
+    print(f"Window size: {args.window:.0f}s ({args.window/60:.0f} min)")
 
     # Process each file
     success_count = 0
     for nc_path in nc_files:
         if process_single_file(
             nc_path, output_dir,
-            t_start=args.t_start, t_end=args.t_end,
             threshold=args.threshold,
-            title=args.title,
             single_panel=args.single_panel,
             show=args.show,
             dpi=args.dpi,
             no_stats=args.no_stats,
+            window_seconds=args.window,
         ):
             success_count += 1
 
