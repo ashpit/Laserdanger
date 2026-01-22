@@ -370,8 +370,10 @@ Examples:
         """
     )
     parser.add_argument("input", type=Path, help="Input L2 NetCDF file")
+    parser.add_argument("-c", "--config", type=Path, default=None,
+                        help="Config file to determine output directory (uses plot_folder/level2/)")
     parser.add_argument("-o", "--output-dir", type=Path, default=None,
-                        help="Output directory (default: figures/ in input dir)")
+                        help="Output directory (default: config plot_folder/level2/ or input dir)")
     parser.add_argument("--t-start", type=float, default=None,
                         help="Start time in seconds")
     parser.add_argument("--t-end", type=float, default=None,
@@ -396,10 +398,16 @@ Examples:
         return 1
 
     # Set output directory
-    if args.output_dir is None:
-        output_dir = args.input.parent / "figures"
-    else:
+    if args.output_dir is not None:
         output_dir = args.output_dir
+    elif args.config is not None:
+        # Use config's plot_folder with level2/ subfolder
+        from phase1 import load_config
+        config = load_config(args.config)
+        output_dir = config.plot_folder / "level2"
+    else:
+        # Fallback: figures/ subdirectory in input dir
+        output_dir = args.input.parent / "figures"
 
     # Load data
     print(f"Loading: {args.input}")

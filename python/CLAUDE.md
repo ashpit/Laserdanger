@@ -52,9 +52,10 @@ python/
 │   │   ├── run_daily_l1.py     # Batch L1 processing
 │   │   └── run_daily_l2.py     # Batch L2 processing
 │   ├── qc/                 # Quality control & validation
+│   │   ├── qc_level1.py        # Comprehensive L1 diagnostics (config-driven)
+│   │   ├── qc_level2.py        # Comprehensive L2 diagnostics (config-driven)
 │   │   ├── verify_l1.py        # Compare Python L1 to MATLAB
-│   │   ├── verify_l2.py        # Compare Python L2 to MATLAB
-│   │   └── assess_nc.py        # NC file assessment & diagnostics
+│   │   └── verify_l2.py        # Compare Python L2 to MATLAB
 │   └── visualization/      # Plotting & figure generation
 │       ├── visualize_l1.py     # Standard L1 figures
 │       ├── visualize_l2.py     # Standard L2 figures
@@ -138,35 +139,48 @@ python scripts/processing/run_daily_l2.py --config CONFIG [OPTIONS]
 ### QC Scripts
 
 ```bash
+# Comprehensive L1 QC (config-driven, outputs to plotFolder/qc/level1/)
+python scripts/qc/qc_level1.py --config configs/do_livox_config_20260112.json
+python scripts/qc/qc_level1.py --config configs/do_livox_config_20260112.json --date 2026-01-12
+python scripts/qc/qc_level1.py --config configs/do_livox_config_20260112.json --no-figures
+
+# Comprehensive L2 QC (config-driven, outputs to plotFolder/qc/level2/)
+python scripts/qc/qc_level2.py --config configs/towr_livox_config_20260120.json
+python scripts/qc/qc_level2.py --config configs/towr_livox_config_20260120.json --date 2026-01-20
+
 # Verify L1 against MATLAB
 python scripts/qc/verify_l1.py python.nc matlab.mat [-o report.json]
 python scripts/qc/verify_l1.py python_dir/ matlab_dir/ --batch
 
 # Verify L2 against MATLAB
 python scripts/qc/verify_l2.py python.nc matlab.mat [-o report.json]
-
-# Assess NC file contents
-python scripts/qc/assess_nc.py data/level2/L2_20260120.nc
 ```
 
 ### Visualization Scripts
 
+All visualization scripts support `--config` to automatically save figures to `plotFolder/level1/` or `plotFolder/level2/`:
+
 ```bash
-# L1 visualization (DEM, stats, profiles)
-python scripts/visualization/visualize_l1.py L1_file.nc [-o output_dir/]
+# L1 visualization (DEM, stats, profiles) → plotFolder/level1/
+python scripts/visualization/visualize_l1.py L1_file.nc --config CONFIG
+python scripts/visualization/visualize_l1.py L1_file.nc [-o output_dir/]  # or explicit output
 
-# L2 visualization (timestacks, intensity, wave detection)
-python scripts/visualization/visualize_l2.py L2_file.nc [-o output_dir/]
+# Animated L1 GIF with slope calculation → plotFolder/level1/
+python scripts/visualization/gif_nc_l1.py L1_file.nc --config CONFIG [--fps 2] [--save-slopes]
 
-# Animated L1 GIF with slope calculation
-python scripts/visualization/gif_nc_l1.py L1_file.nc [--fps 2] [--save-slopes]
+# L2 visualization (timestacks, intensity, wave detection) → plotFolder/level2/
+python scripts/visualization/visualize_l2.py L2_file.nc --config CONFIG
+python scripts/visualization/visualize_l2.py L2_file.nc [-o output_dir/]  # or explicit output
 
-# Runup analysis figures
-python scripts/visualization/plot_runup.py L2_file.nc [-o output_dir/]
+# Runup analysis figures → plotFolder/level2/
+python scripts/visualization/plot_runup.py L2_file.nc --config CONFIG
+python scripts/visualization/plot_runup.py L2_file.nc [-o output_dir/]  # or explicit output
 
-# Publication-style runup timestack
-python scripts/visualization/plot_runup_timestack.py L2_file.nc [--t-start 200 --t-end 360]
+# Publication-style runup timestack → plotFolder/level2/
+python scripts/visualization/plot_runup_timestack.py L2_file.nc --config CONFIG [--t-start 200 --t-end 360]
 ```
+
+Output path priority: `--output` > `--config` (plotFolder) > fallback (input directory)
 
 ## Configuration
 
@@ -198,6 +212,29 @@ cp configs/do_livox_config_20260112.json configs/newsite_livox_config_20260122.j
   ],
   "LidarBoundary": [[x1, y1], [x2, y2], ..., [xn, yn]]
 }
+```
+
+## Output Directory Structure
+
+Config-driven scripts organize outputs as follows:
+
+```
+processFolder/                  # NetCDF data outputs
+├── level1/
+│   └── L1_YYYYMMDD.nc         # Daily gridded surfaces
+└── level2/
+    └── L2_YYYYMMDD.nc         # Daily timestacks
+
+plotFolder/                     # Figures and QC reports
+├── level1/                    # L1 visualization outputs
+├── level2/                    # L2 visualization outputs
+└── qc/
+    ├── level1/                # L1 QC diagnostics
+    │   ├── qc_report.json
+    │   └── YYYYMMDD/          # Date-specific figures
+    └── level2/                # L2 QC diagnostics
+        ├── qc_report.json
+        └── YYYYMMDD/          # Date-specific figures
 ```
 
 ## Output Formats

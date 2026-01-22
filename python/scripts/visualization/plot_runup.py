@@ -523,10 +523,16 @@ def main():
         help="Path to NC file or directory containing NC files"
     )
     parser.add_argument(
+        "--config", "-c",
+        type=Path,
+        default=None,
+        help="Config file to determine output directory (uses plot_folder/level2/)"
+    )
+    parser.add_argument(
         "--output-dir", "-o",
         type=Path,
         default=None,
-        help="Output directory for figures (default: figures/l2)"
+        help="Output directory for figures (default: config plot_folder/level2/ or figures/l2)"
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -537,10 +543,16 @@ def main():
     args = parser.parse_args()
 
     # Determine output directory
-    if args.output_dir is None:
-        output_dir = Path(__file__).parent.parent / "figures" / "l2"
-    else:
+    if args.output_dir is not None:
         output_dir = args.output_dir
+    elif args.config is not None:
+        # Use config's plot_folder with level2/ subfolder
+        from phase1 import load_config
+        config = load_config(args.config)
+        output_dir = config.plot_folder / "level2"
+    else:
+        # Fallback: figures/l2 relative to script
+        output_dir = Path(__file__).parent.parent / "figures" / "l2"
 
     output_dir.mkdir(parents=True, exist_ok=True)
 

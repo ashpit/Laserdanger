@@ -44,6 +44,9 @@ import matplotlib.animation as animation
 import numpy as np
 import xarray as xr
 
+# Add code directory to path for config loading
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "code"))
+
 
 def print_metadata(ds: xr.Dataset, nc_path: Path) -> dict:
     """
@@ -747,10 +750,16 @@ Examples:
         help="Input L1 NetCDF file"
     )
     parser.add_argument(
+        "--config", "-c",
+        type=Path,
+        default=None,
+        help="Config file to determine output directory (uses plot_folder/level1/)"
+    )
+    parser.add_argument(
         "--output", "-o",
         type=Path,
         default=None,
-        help="Output GIF path (default: same name with .gif extension)"
+        help="Output GIF path (default: config plot_folder/level1/ or input dir)"
     )
     parser.add_argument(
         "--variable", "-v",
@@ -858,10 +867,18 @@ Examples:
         sys.exit(0)
 
     # Determine output path
-    if args.output is None:
-        output_path = args.input.with_suffix('.gif')
-    else:
+    if args.output is not None:
         output_path = args.output
+    elif args.config is not None:
+        # Use config's plot_folder with level1/ subfolder
+        from phase1 import load_config
+        config = load_config(args.config)
+        output_dir = config.plot_folder / "level1"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / args.input.with_suffix('.gif').name
+    else:
+        # Fallback: same directory as input
+        output_path = args.input.with_suffix('.gif')
 
     # Create GIF
     try:
@@ -883,7 +900,7 @@ Examples:
 
         # Save slopes if requested
         if args.save_slopes:
-            slopes_path = args.input.with_name(args.input.stem + '_slopes.nc')
+            slopes_path = output_path.parent / (args.input.stem + '_slopes.nc')
             save_slopes_to_nc(slopes, times, y_pos, args.x_max, slopes_path)
 
     except ValueError as e:

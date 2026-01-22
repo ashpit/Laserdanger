@@ -9,11 +9,15 @@ Usage:
 """
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
+
+# Add code directory to path for config loading
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "code"))
 
 
 def load_l1_dataset(path: Path) -> xr.Dataset:
@@ -198,8 +202,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("input", type=Path, help="Input L1 NetCDF file")
+    parser.add_argument("-c", "--config", type=Path, default=None,
+                        help="Config file to determine output directory (uses plot_folder/level1/)")
     parser.add_argument("-o", "--output", type=Path, default=None,
-                        help="Output directory for figures (default: same as input)")
+                        help="Output directory for figures (default: config plot_folder/level1/ or input dir)")
     parser.add_argument("--show", action="store_true", help="Show plots interactively")
     parser.add_argument("--no-summary", action="store_true", help="Skip printing summary")
 
@@ -210,10 +216,16 @@ def main():
         return 1
 
     # Set output directory
-    if args.output is None:
-        output_dir = args.input.parent / "figures"
-    else:
+    if args.output is not None:
         output_dir = args.output
+    elif args.config is not None:
+        # Use config's plot_folder with level1/ subfolder
+        from phase1 import load_config
+        config = load_config(args.config)
+        output_dir = config.plot_folder / "level1"
+    else:
+        # Fallback: figures/ subdirectory in input dir
+        output_dir = args.input.parent / "figures"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load data
