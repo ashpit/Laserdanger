@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 # Add code directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "code"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "code"))
 
 from validation import (
     compare_l2_outputs,
