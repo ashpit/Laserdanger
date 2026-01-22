@@ -62,7 +62,7 @@ def main():
     )
     parser.add_argument(
         "--output-dir", type=Path, default=None,
-        help="Output directory (default: from config processFolder)"
+        help="Output directory (default: {processFolder}/level1 from config)"
     )
     parser.add_argument(
         "--start", type=str, default=None,
@@ -115,11 +115,11 @@ def main():
         logger.error("Failed to load config: %s", e)
         sys.exit(1)
 
-    # Determine output directory (default: python/data/level1/)
+    # Determine output directory (default: from config processFolder/level1)
     if args.output_dir:
         output_dir = Path(args.output_dir)
     else:
-        output_dir = Path(__file__).parent.parent / "data" / "level1"
+        output_dir = cfg.process_folder / "level1"
     output_dir = output_dir.resolve()
 
     # Discover date range from LAZ files

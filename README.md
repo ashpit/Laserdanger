@@ -1,138 +1,295 @@
 # Laserdanger
 
-**Laserdanger** is a MATLAB-based LiDAR data processing pipeline designed to analyze point cloud data from a Livox Avia sensor. The system processes raw `.laz` files to generate time-resolved beach surface Digital Elevation Models (DEMs) and resolve high-frequency wave runup dynamics.
+**Laserdanger** is a LiDAR data processing pipeline for analyzing point cloud data from Livox Avia sensors. The system processes raw `.laz` files to generate beach surface Digital Elevation Models (DEMs) and resolve high-frequency wave runup dynamics.
 
-This project was developed by **Ashton Domi** for his PhD thesis at the **Scripps Institution of Oceanography** (Coastal Processes Group).
+Developed by **Ashton Domi** for his PhD thesis at **Scripps Institution of Oceanography** (Coastal Processes Group).
 
----
-
-## Project Overview
-
-The repository implements a two-level processing pipeline to analyze coastal morphology and wave dynamics:
-
-1.  **Level 1 (L1): Beach Surface Morphology**
-    *   Generates clean, 30-minute average beach surface DEMs.
-    *   Used for analyzing morphological changes over hours or days.
-2.  **Level 2 (L2): Wave Runup Analysis**
-    *   Resolves wave runup dynamics at high frequency (2Hz).
-    *   Used for studying swash zone processes and wave runup statistics.
-
-## Architecture & Pipelines
-
-### Level 1 (L1): Hourly/Daily Beach Surface
-*   **Goal:** Create vectorized beach surfaces (min, max, mode, mean) organized by date.
-*   **Entry Point:** `matlab/L1_pipeline.m` (or `matlab/L1_batchpipeline.m` for batch mode).
-*   **Key Steps:**
-    1.  **Ingestion:** Reads `.laz` files based on a specified time range.
-    2.  **Transformation:** Applies a homogeneous transformation matrix (LiDAR frame → UTM coordinates) defined in `livox_config.json`.
-    3.  **Binning:** Rasterizes point clouds into 0.10m spatial bins using `accumpts.m`.
-    4.  **Filtering:**
-        *   **Intensity Filter:** Removes points with intensity > 100.
-        *   **SNR Filter:** Removes noisy bins based on Signal-to-Noise Ratio (SNR = mean/standard_error).
-        *   **Residual Kernel Filter:** Uses `ResidualKernelFilter.m` (Delaunay triangulation + planar fitting) to remove off-ground noise (two passes: 10m/0.2m and 3m/0.1m).
-    5.  **Output:** `L1` struct containing `X`, `Y`, `Zmean`, `Zmin`, `Zmode`, etc.
-    6.  **Visualization:** Extracts 1D cross-shore profiles (`Get3_1Dprofiles.m`) and exports to `lidar_plot_data.json`.
-
-### Level 2 (L2): Wave Runup Analysis
-*   **Goal:** Create time-stacked elevation matrices `Z(x,t)` and detect the water runup edge.
-*   **Entry Point:** `matlab/L2_pipeline.m` (or `matlab/L2_pipeline_testing.m`).
-*   **Key Steps:**
-    1.  **Temporal Accumulation:** Uses `accumpts_L2.m` to bin data in both space and time (~2Hz).
-    2.  **Profile Extraction:** Generates `Z(x,t)`, `X(x,t)`, and `I(x,t)` arrays along a centered transect.
-    3.  **Runup Detection:** `get_runupStats_L2.m` identifies the instantaneous water edge.
-    *   Analysis: Computes spectral stats (IG vs. Incident band), beach slope (beta), and runup time series.
-
-### Python Port (New)
-A modern, modular Python implementation of the pipeline is currently in development under `python/code/`.
-*   **Goal:** Replicate MATLAB L1 functionality using a robust, open-source stack (numpy, scipy, xarray).
-*   **Structure:**
-    *   **Phase 1:** Pure ingestion & preprocessing.
-    *   **Phase 2:** Core algorithms (binning, filtering).
-    *   **Phase 3:** Data modeling with xarray.
-    *   **Phase 4:** Pipeline orchestration.
-*   **Documentation:** See [AGENTS.md](AGENTS.md) for detailed architecture and usage of the Python modules.
+> **Note**: Active development is in `python/` only. The MATLAB code is legacy and no longer maintained.
 
 ---
 
-## Key Functions
+## Processing Levels
 
-### Core Processing
-*   **`accumpts.m`**: Bins 3D points to a grid. Applies a 50th percentile filter within bins and computes statistics (mean, max, min, mode, std). Filters unreliable bins based on SNR.
-*   **`accumpts_L2.m`**: Extends `accumpts.m` to include the time dimension for L2 processing.
-*   **`ResidualKernelFilter.m`**: Advanced noise removal. Creates a Delaunay triangulation of the point cloud, fits a plane to each triangle using SVD, and removes points exceeding a threshold distance from the plane.
-
-### Profile & Runup
-*   **`Get3_1Dprofiles.m`**: Projects the 3D point cloud onto multiple shore-normal transects (e.g., at -8m to +10m alongshore spacing). Uses quadratic fitting to remove residual outliers.
-*   **`get_runupStats_L2.m`**: Detects the runup line from `Z(x,t)` matrices.
-    *   Constructs a "dry beach" reference surface using a moving minimum filter (default 100s window).
-    *   Identifies the water edge where elevation exceeds the dry beach by a threshold (default 0.1m).
-    *   Computes spectral analysis (IG and Incident bands) and foreshore slope.
-
-### Utilities
-*   **`lidar_config.m`**: Generates JSON configuration files (e.g., `livox_config.json`) containing paths, transformation matrices, and boundary polygons.
-*   **`fitPlane.m`**: SVD-based plane fitting helper.
-*   **`inpaint_nans.m`**: Interpolates NaN values to fill gaps in data.
-*   **`roundToHalfHour.m`**: Utility for time binning.
+| Level | Purpose | Output | Temporal Resolution |
+|-------|---------|--------|---------------------|
+| **L1** | Beach surface morphology | 2D gridded DEMs (z_mean, z_mode, etc.) | Daily aggregates |
+| **L2** | Wave runup dynamics | Z(x,t) timestacks along transects | ~2 Hz (0.5s bins) |
 
 ---
 
-## Configuration
+## Quick Start (Python)
 
-The system is configured via `matlab/lidar_config.m`, which generates the JSON config file used by the pipelines.
+### 1. Install Dependencies
 
-**Key Configuration Fields:**
-*   **`dataFolder`**: Path to raw `.laz` files.
-*   **`processFolder`**: Output directory for processed data.
-*   **`transformMatrix`**: 4x4 homogeneous matrix to convert from LiDAR sensor coordinates to UTM (NAD83, Zone 11N). *Note: Different matrices may be required for different deployment periods.*
-*   **`LidarBoundary`**: Polygon vertices defining the valid spatial extent (beach area) in UTM coordinates.
-
----
-
-## Usage
-
-### 1. Setup Configuration
-Open `matlab/lidar_config.m`, adjust the paths and transformation matrix for your dataset, and run it to generate `livox_config.json`.
-
-```matlab
-run matlab/lidar_config.m
+```bash
+cd python
+pip install -r requirements.txt
 ```
 
-### 2. Run L1 Pipeline (Beach Surface)
-To process daily beach surfaces:
+### 2. Create a Configuration File
 
-```matlab
-% In MATLAB
-L1_pipeline
-% Or for batch processing:
-L1_batchpipeline
+Create a JSON config file for your site. Copy an existing template and modify:
+
+```bash
+cp configs/do_livox_config_20260112.json configs/mysite_livox_config_20260122.json
 ```
 
-### 3. Run L2 Pipeline (Wave Runup)
-To process wave runup data:
+Edit the config with your site-specific settings:
 
-```matlab
-% In MATLAB
-config = jsondecode(fileread('livox_config.json'));
-L2_pipeline
+```json
+{
+  "dataFolder": "/path/to/your/laz/files",
+  "processFolder": "/path/to/output",
+  "transformMatrix": [
+    [0.999, 0.012, 0.003, 476543.21],
+    [-0.012, 0.999, 0.001, 3628901.45],
+    [-0.003, -0.001, 1.000, 42.15],
+    [0, 0, 0, 1]
+  ],
+  "LidarBoundary": [
+    [476500, 3628850],
+    [476600, 3628850],
+    [476600, 3628950],
+    [476500, 3628950]
+  ]
+}
 ```
 
-### 4. Visualize Results
-To plot a cross-shore profile from the L1 structure:
+**Config fields explained:**
 
-```matlab
-% Assuming 'L1' struct exists in workspace
-[x1d, Z3D] = Get3_1Dprofiles(L1(i).X, L1(i).Y, L1(i).Zmode);
-plot(x1d, Z3D(5,:)); % Plot central transect
+| Field | Description |
+|-------|-------------|
+| `dataFolder` | Directory containing raw `.laz` files (named with timestamps) |
+| `processFolder` | Where to write intermediate outputs |
+| `transformMatrix` | 4×4 homogeneous matrix: LiDAR sensor coords → UTM (NAD83) |
+| `LidarBoundary` | Polygon vertices (UTM) defining the valid beach area |
+
+### 3. Run L1 Processing (Beach Surfaces)
+
+```bash
+cd python
+
+# Process all days found in dataFolder
+python scripts/run_daily_l1.py --config configs/mysite_livox_config_20260122.json
+
+# Process specific date range
+python scripts/run_daily_l1.py --config configs/mysite_livox_config_20260122.json \
+    --start 2026-01-15 --end 2026-01-20
+
+# Preview without processing (dry run)
+python scripts/run_daily_l1.py --config configs/mysite_livox_config_20260122.json --dry-run
+```
+
+**Output**: `python/data/level1/L1_YYYYMMDD.nc` (one NetCDF per day)
+
+### 4. Run L2 Processing (Wave Runup)
+
+```bash
+# Process all days
+python scripts/run_daily_l2.py --config configs/mysite_livox_config_20260122.json
+
+# Higher temporal resolution (4 Hz)
+python scripts/run_daily_l2.py --config configs/mysite_livox_config_20260122.json --time-bin 0.25
+```
+
+**Output**: `python/data/level2/L2_YYYYMMDD.nc` (one NetCDF per day)
+
+---
+
+## CLI Reference
+
+### L1 Processing: `run_daily_l1.py`
+
+```
+python scripts/run_daily_l1.py --config PATH [OPTIONS]
+
+Required:
+  --config PATH       Path to JSON config file
+
+Options:
+  --output-dir DIR    Output directory (default: python/data/level1)
+  --start DATE        Start date as YYYY-MM-DD (default: auto-detect from files)
+  --end DATE          End date as YYYY-MM-DD (default: auto-detect from files)
+  --bin-size FLOAT    Spatial bin size in meters (default: 0.1)
+  --resume            Resume from checkpoint if interrupted
+  --dry-run           Show what would be processed without running
+  --verbose, -v       Enable debug logging
+  --quiet, -q         Suppress non-error output
+  --no-progress       Disable progress bars
+```
+
+### L2 Processing: `run_daily_l2.py`
+
+```
+python scripts/run_daily_l2.py --config PATH [OPTIONS]
+
+Required:
+  --config PATH       Path to JSON config file
+
+Options:
+  --output-dir DIR    Output directory (default: python/data/level2)
+  --start DATE        Start date as YYYY-MM-DD
+  --end DATE          End date as YYYY-MM-DD
+  --time-bin FLOAT    Temporal bin size in seconds (default: 0.5 = 2Hz)
+  --x-bin FLOAT       Spatial bin size along transect in meters (default: 0.1)
+  --multi-transect    Extract multiple alongshore transects
+  --outlier-detection Enable outlier detection (off by default)
+  --resume            Resume from checkpoint if interrupted
+  --dry-run           Show what would be processed without running
+  --verbose, -v       Enable debug logging
 ```
 
 ---
 
-## Data Coordinate Systems
-*   **Input:** Livox LiDAR native coordinates (Sensor Frame XYZ).
-*   **Intermediate:** Homogeneous coordinates for matrix transformation.
-*   **Output:** UTM Coordinates (NAD83, Zone 11N) with NAVD88 elevation.
+## Output Formats
+
+### L1 NetCDF Variables
+
+| Variable | Description |
+|----------|-------------|
+| `z_mean` | Mean elevation per bin |
+| `z_mode` | Modal elevation (most common) |
+| `z_min` | Minimum elevation |
+| `z_max` | Maximum elevation |
+| `z_std` | Standard deviation |
+| `count` | Point count per bin |
+
+### L2 NetCDF Variables
+
+| Variable | Description |
+|----------|-------------|
+| `Z` | Elevation timestack Z(x, t) |
+| `I` | Intensity timestack I(x, t) |
+| `x` | Cross-shore distance coordinate |
+| `time` | Time coordinate |
+
+---
+
+## Example: Working with Output Data
+
+```python
+import xarray as xr
+import matplotlib.pyplot as plt
+
+# Load L1 daily surface
+ds = xr.open_dataset("python/data/level1/L1_20260115.nc")
+ds.z_mode.plot()
+plt.title("Beach Surface (Mode Elevation)")
+plt.show()
+
+# Load L2 timestack
+ds2 = xr.open_dataset("python/data/level2/L2_20260115.nc")
+ds2.Z.plot(x="time", y="x")
+plt.title("Elevation Timestack")
+plt.show()
+```
+
+---
+
+## Transformation Matrix
+
+The `transformMatrix` converts from LiDAR sensor coordinates to UTM. This is a 4×4 homogeneous transformation matrix:
+
+```
+| R11  R12  R13  Tx |     R = rotation matrix (3×3)
+| R21  R22  R23  Ty |     T = translation vector (Tx, Ty, Tz)
+| R31  R32  R33  Tz |
+|  0    0    0   1  |
+```
+
+To determine your transformation matrix:
+1. Collect ground control points (GCPs) with known UTM coordinates
+2. Identify corresponding points in the LiDAR data
+3. Solve for the rigid transformation (rotation + translation)
+
+---
+
+## Directory Structure
+
+```
+python/
+├── code/           # Source modules (phase1-4, profiles, runup, utils)
+├── configs/        # Site/date-specific JSON configs
+├── scripts/        # CLI entry points (run_daily_l1.py, run_daily_l2.py)
+├── tests/          # pytest suite (186+ tests)
+├── data/           # Output data
+│   ├── level1/     # L1 NetCDF outputs
+│   └── level2/     # L2 NetCDF outputs
+└── docs/           # Documentation
+```
+
+---
 
 ## Requirements
-*   MATLAB (with Image Processing Toolbox, Statistics Toolbox)
-*   `lasFileReader` (for reading `.laz` files)
-*   Point Cloud Processing Toolbox
+
+**Python 3.10+** with:
+
+```
+numpy>=1.21.0
+scipy>=1.7.0
+pandas>=1.3.0
+laspy>=2.0.0
+lazrs>=0.5.0
+xarray>=0.19.0
+netCDF4>=1.5.0
+matplotlib>=3.4.0
+tqdm>=4.62.0
+```
+
+Install all dependencies:
+
+```bash
+cd python
+pip install -r requirements.txt
+```
+
+---
+
+## Running Tests
+
+```bash
+cd python
+pytest tests/ -v
+
+# With coverage
+pytest tests/ --cov=code --cov-report=html
+```
+
+---
+
+## Troubleshooting
+
+### No LAZ files found
+- Verify `dataFolder` path in your config is correct
+- Check that LAZ files have timestamps in their filenames
+- Use `--dry-run` to see what files would be discovered
+
+### Transform matrix issues
+- Ensure the matrix is 4×4 with bottom row `[0, 0, 0, 1]`
+- Verify UTM zone matches your GCPs
+- Check that output coordinates fall within expected bounds
+
+### Memory errors on large datasets
+- Process smaller date ranges with `--start` and `--end`
+- Use `--resume` to continue if processing is interrupted
+
+---
+
+## Legacy MATLAB Code
+
+The original MATLAB implementation is in the repository root (`matlab/`). It is no longer actively maintained but remains available for reference.
+
+Key MATLAB entry points:
+- `L1_pipeline.m` - Single-day L1 processing
+- `L2_pipeline.m` - Single-day L2 processing
+- `lidar_config.m` - Config file generator
+
+---
+
+## License
+
+This project was developed for academic research at Scripps Institution of Oceanography.
+
+## Contact
+
+For questions about this codebase, contact Ashton Domi at the Scripps Institution of Oceanography.

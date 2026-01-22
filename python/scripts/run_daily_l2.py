@@ -72,7 +72,7 @@ Examples:
     )
     parser.add_argument(
         "--output-dir", type=Path, default=None,
-        help="Output directory (default: python/data/level2)"
+        help="Output directory (default: {processFolder}/level2 from config)"
     )
     parser.add_argument(
         "--start", type=str, default=None,
@@ -137,10 +137,9 @@ Examples:
         logger.error("Failed to load config: %s", e)
         sys.exit(1)
 
-    # Determine output directory
+    # Determine output directory (default: from config processFolder/level2)
     if args.output_dir is None:
-        # Default to python/data/level2
-        output_dir = Path(__file__).parent.parent / "data" / "level2"
+        output_dir = cfg.process_folder / "level2"
     else:
         output_dir = args.output_dir
 
