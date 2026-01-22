@@ -9,7 +9,7 @@ Usage:
     python scripts/run_daily_l1.py [options]
 
 Options:
-    --config PATH     Path to config file (default: configs/do.json)
+    --config PATH     Path to config file (required, e.g., configs/do_livox_config_20260112.json)
     --output-dir DIR  Output directory (default: from config processFolder)
     --resume          Resume from checkpoint if available
     --verbose         Enable debug logging
@@ -57,8 +57,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--config", type=Path, default=Path("configs/do.json"),
-        help="Path to config file (default: configs/do.json). See configs/ for available site configs."
+        "--config", type=Path, required=True,
+        help="Path to config file (e.g., configs/do_livox_config_20260112.json)"
     )
     parser.add_argument(
         "--output-dir", type=Path, default=None,

@@ -1498,17 +1498,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Process single L1 dataset (use site-specific config from configs/)
-  python phase4.py l1 configs/do.json -o output.nc --start 2024-06-15 --end 2024-06-16
+  # Process single L1 dataset (use site/date-specific config from configs/)
+  python phase4.py l1 configs/do_livox_config_20260112.json -o output.nc --start 2026-01-12 --end 2026-01-13
 
   # Process L2 wave data
-  python phase4.py l2 configs/do.json -o l2_output.nc --start 2024-06-15T10:00 --end 2024-06-15T10:30
+  python phase4.py l2 configs/towr_livox_config_20260120.json -o l2.nc --start 2026-01-20T10:00 --end 2026-01-20T10:30
 
   # Batch process L1 with resume capability
-  python phase4.py batch configs/do.json -o ./output/ --start 2024-06-01 --end 2024-06-30 --resume
+  python phase4.py batch configs/do_livox_config_20260112.json -o ./output/ --start 2026-01-12 --end 2026-01-20 --resume
 
   # Batch process L2
-  python phase4.py batch-l2 configs/do.json -o ./l2_output/ --start 2024-06-15 --end 2024-06-16
+  python phase4.py batch-l2 configs/towr_livox_config_20260120.json -o ./l2_output/ --start 2026-01-20 --end 2026-01-21
         """,
     )
 

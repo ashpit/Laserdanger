@@ -12,7 +12,7 @@ Usage:
     python scripts/run_daily_l2.py [options]
 
 Options:
-    --config PATH       Path to config file (default: configs/do.json)
+    --config PATH       Path to config file (required, e.g., configs/towr_livox_config_20260120.json)
     --output-dir DIR    Output directory (default: python/data/level2)
     --resume            Resume from checkpoint if available
     --verbose           Enable debug logging
@@ -60,15 +60,15 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python scripts/run_daily_l2.py
-    python scripts/run_daily_l2.py --config configs/do.json --resume
-    python scripts/run_daily_l2.py --config configs/newsite.json --start 2025-05-03
-    python scripts/run_daily_l2.py --time-bin 0.25 --multi-transect
+    python scripts/run_daily_l2.py --config configs/do_livox_config_20260112.json
+    python scripts/run_daily_l2.py --config configs/do_livox_config_20260112.json --resume
+    python scripts/run_daily_l2.py --config configs/towr_livox_config_20260120.json --start 2026-01-20
+    python scripts/run_daily_l2.py --config configs/do_livox_config_20260112.json --time-bin 0.25
         """
     )
     parser.add_argument(
-        "--config", type=Path, default=Path("configs/do.json"),
-        help="Path to config file (default: configs/do.json). See configs/ for available site configs."
+        "--config", type=Path, required=True,
+        help="Path to config file (e.g., configs/towr_livox_config_20260120.json)"
     )
     parser.add_argument(
         "--output-dir", type=Path, default=None,
