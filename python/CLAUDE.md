@@ -26,6 +26,9 @@ python scripts/processing/run_daily_l2.py --config configs/towr_livox_config_202
 # Visualize L1 output
 python scripts/visualization/visualize_l1.py data/level1/L1_20260112.nc
 
+# Create animated GIFs for all L1 files
+python scripts/visualization/gif_nc_l1.py --config configs/do_livox_config_20260112.json
+
 # Validate against MATLAB
 python scripts/qc/verify_l1.py python_output.nc matlab_output.mat
 ```
@@ -165,8 +168,11 @@ All visualization scripts support `--config` to automatically save figures to `p
 python scripts/visualization/visualize_l1.py L1_file.nc --config CONFIG
 python scripts/visualization/visualize_l1.py L1_file.nc [-o output_dir/]  # or explicit output
 
-# Animated L1 GIF with slope calculation → plotFolder/level1/
-python scripts/visualization/gif_nc_l1.py L1_file.nc --config CONFIG [--fps 2] [--save-slopes]
+# Animated L1 GIFs with slope calculation → plotFolder/level1/
+# Processes ALL L1 files from processFolder/level1/ by default
+python scripts/visualization/gif_nc_l1.py --config CONFIG
+python scripts/visualization/gif_nc_l1.py --config CONFIG --input L1_20260112.nc  # single file
+python scripts/visualization/gif_nc_l1.py --config CONFIG [--fps 2] [--save-slopes]
 
 # L2 visualization (timestacks, intensity, wave detection) → plotFolder/level2/
 python scripts/visualization/visualize_l2.py L2_file.nc --config CONFIG

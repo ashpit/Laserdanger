@@ -115,8 +115,9 @@ python scripts/qc/qc_level1.py --config configs/mysite_livox_config_20260122.jso
 # L1 visualization (uses config to determine output directory)
 python scripts/visualization/visualize_l1.py L1_file.nc --config configs/mysite_livox_config_20260122.json
 
-# Animated GIF with slope calculation
-python scripts/visualization/gif_nc_l1.py L1_file.nc --config configs/mysite_livox_config_20260122.json
+# Animated GIFs with slope calculation (processes ALL L1 files from processFolder/level1/)
+python scripts/visualization/gif_nc_l1.py --config configs/mysite_livox_config_20260122.json
+python scripts/visualization/gif_nc_l1.py --config configs/mysite_livox_config_20260122.json --input L1_20260122.nc  # single file
 
 # L2 visualization
 python scripts/visualization/visualize_l2.py L2_file.nc --config configs/mysite_livox_config_20260122.json

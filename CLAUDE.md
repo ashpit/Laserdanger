@@ -160,7 +160,10 @@ All visualization scripts support `--config` to automatically output figures to 
 ```bash
 # L1 visualizations → plotFolder/level1/
 python scripts/visualization/visualize_l1.py L1_file.nc --config configs/do_livox_config_20260112.json
-python scripts/visualization/gif_nc_l1.py L1_file.nc --config configs/do_livox_config_20260112.json
+
+# Animated L1 GIFs (processes ALL L1 files from processFolder/level1/)
+python scripts/visualization/gif_nc_l1.py --config configs/do_livox_config_20260112.json
+python scripts/visualization/gif_nc_l1.py --config configs/do_livox_config_20260112.json --input L1_20260112.nc  # single file
 
 # L2 visualizations → plotFolder/level2/
 python scripts/visualization/visualize_l2.py L2_file.nc --config configs/towr_livox_config_20260120.json

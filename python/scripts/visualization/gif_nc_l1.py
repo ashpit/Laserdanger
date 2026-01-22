@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create animated GIF from L1 NetCDF file showing beach surface grids and
+Create animated GIFs from L1 NetCDF files showing beach surface grids and
 cross-shore profiles with slope calculation.
 
 Two-panel figure:
@@ -11,10 +11,16 @@ Displays metadata about timestamps and grid statistics both in the animation
 frames and printed to the command line.
 
 Usage:
-    python scripts/gif_nc_l1.py path/to/L1_YYYYMMDD.nc [options]
+    # Process all L1 files from config (recommended)
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json
+
+    # Process single file
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json --input L1_20260112.nc
 
 Options:
-    --output PATH       Output GIF path (default: same name as input with .gif)
+    --config PATH       Path to config file (required)
+    --input FILE        Process single file (filename only, looked up in processFolder/level1/)
+    --output PATH       Output GIF path (default: plotFolder/level1/)
     --variable VAR      Variable to plot (default: elevation_mode)
     --cmap COLORMAP     Matplotlib colormap (default: terrain)
     --fps FPS           Frames per second (default: 2)
@@ -28,10 +34,14 @@ Options:
     --save-slopes       Save slopes to NetCDF file
 
 Examples:
-    python scripts/gif_nc_l1.py data/level1/L1_20260115.nc
-    python scripts/gif_nc_l1.py data/level1/L1_20260115.nc --variable elevation --cmap viridis
-    python scripts/gif_nc_l1.py data/level1/L1_20260115.nc --output beach_surface.gif --fps 1
-    python scripts/gif_nc_l1.py data/level1/L1_20260115.nc --y-index 50 --x-max 30
+    # Process all L1 files in processFolder/level1/
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json
+
+    # Process specific file
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json --input L1_20260115.nc
+
+    # Custom visualization settings
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json --variable elevation --cmap viridis --fps 1
 """
 import argparse
 import sys
@@ -718,48 +728,128 @@ def save_slopes_to_nc(
     print(f'Saved slopes to: {output_path}')
 
 
+def process_single_file(
+    nc_path: Path,
+    output_path: Path,
+    args,
+) -> bool:
+    """
+    Process a single NC file and create GIF.
+
+    Returns True on success, False on failure.
+    """
+    print(f"\n{'='*70}")
+    print(f"Processing: {nc_path.name}")
+    print(f"{'='*70}")
+
+    # Load dataset
+    try:
+        ds = xr.open_dataset(nc_path)
+    except Exception as e:
+        print(f"Error: Failed to open NetCDF file: {e}", file=sys.stderr)
+        return False
+
+    # List variables mode
+    if args.list_variables:
+        print(f"Variables in {nc_path.name}:")
+        for var in sorted(ds.data_vars):
+            dims = ", ".join(ds[var].dims)
+            print(f"  {var} ({dims})")
+        ds.close()
+        return True
+
+    # Print metadata
+    metadata = print_metadata(ds, nc_path)
+
+    # Exit if metadata-only mode
+    if args.metadata_only:
+        ds.close()
+        return True
+
+    # Create GIF
+    try:
+        slopes, times, y_pos = create_gif(
+            ds,
+            output_path,
+            variable=args.variable,
+            cmap=args.cmap,
+            fps=args.fps,
+            dpi=args.dpi,
+            vmin=args.vmin,
+            vmax=args.vmax,
+            show_colorbar=not args.no_colorbar,
+            show_profile=not args.no_profile,
+            y_index=args.y_index,
+            x_max_relative=args.x_max,
+            metadata=metadata,
+        )
+
+        # Save slopes if requested
+        if args.save_slopes:
+            slopes_path = output_path.parent / (nc_path.stem + '_slopes.nc')
+            save_slopes_to_nc(slopes, times, y_pos, args.x_max, slopes_path)
+
+        ds.close()
+        return True
+
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        ds.close()
+        return False
+    except Exception as e:
+        print(f"Error creating GIF: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        ds.close()
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Create animated GIF from L1 NetCDF file (DEM + profile with slope)",
+        description="Create animated GIFs from L1 NetCDF files (DEM + profile with slope)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Basic two-panel animation (DEM + profile with slope)
-    python scripts/gif_nc_l1.py data/level1/L1_20260115.nc
+    # Process all L1 files from config
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json
 
-    # Just print metadata
-    python scripts/gif_nc_l1.py data/level1/L1_20260115.nc --metadata-only
+    # Process specific file only
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json --input L1_20260115.nc
+
+    # Just print metadata for all files
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json --metadata-only
 
     # Custom settings
-    python scripts/gif_nc_l1.py data/level1/L1_20260115.nc -v elevation -c viridis --fps 1
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json -v elevation --cmap viridis --fps 1
 
     # Specify profile location and slope fit range
-    python scripts/gif_nc_l1.py data/level1/L1_20260115.nc --y-index 50 --x-max 30
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json --y-index 50 --x-max 30
 
     # DEM only (no profile panel)
-    python scripts/gif_nc_l1.py data/level1/L1_20260115.nc --no-profile
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json --no-profile
 
-    # Save slopes to NetCDF
-    python scripts/gif_nc_l1.py data/level1/L1_20260115.nc --save-slopes
+    # Save slopes to NetCDF for all files
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json --save-slopes
         """
     )
 
     parser.add_argument(
-        "input",
-        type=Path,
-        help="Input L1 NetCDF file"
-    )
-    parser.add_argument(
         "--config", "-c",
         type=Path,
+        required=True,
+        help="Config file (required) - reads NC files from processFolder/level1/"
+    )
+    parser.add_argument(
+        "--input", "-i",
+        type=str,
         default=None,
-        help="Config file to determine output directory (uses plot_folder/level1/)"
+        help="Process single file only (filename or full path)"
     )
     parser.add_argument(
         "--output", "-o",
         type=Path,
         default=None,
-        help="Output GIF path (default: config plot_folder/level1/ or input dir)"
+        help="Output directory for GIFs (default: plotFolder/level1/)"
     )
     parser.add_argument(
         "--variable", "-v",
@@ -837,84 +927,74 @@ Examples:
 
     args = parser.parse_args()
 
-    # Validate input
-    if not args.input.exists():
-        print(f"Error: Input file not found: {args.input}", file=sys.stderr)
+    # Load config
+    from phase1 import load_config
+    if not args.config.exists():
+        print(f"Error: Config file not found: {args.config}", file=sys.stderr)
         sys.exit(1)
 
-    # Load dataset
     try:
-        ds = xr.open_dataset(args.input)
-    except Exception as e:
-        print(f"Error: Failed to open NetCDF file: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    # List variables mode
-    if args.list_variables:
-        print(f"Variables in {args.input.name}:")
-        for var in sorted(ds.data_vars):
-            dims = ", ".join(ds[var].dims)
-            print(f"  {var} ({dims})")
-        ds.close()
-        sys.exit(0)
-
-    # Print metadata
-    metadata = print_metadata(ds, args.input)
-
-    # Exit if metadata-only mode
-    if args.metadata_only:
-        ds.close()
-        sys.exit(0)
-
-    # Determine output path
-    if args.output is not None:
-        output_path = args.output
-    elif args.config is not None:
-        # Use config's plot_folder with level1/ subfolder
-        from phase1 import load_config
         config = load_config(args.config)
-        output_dir = config.plot_folder / "level1"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / args.input.with_suffix('.gif').name
-    else:
-        # Fallback: same directory as input
-        output_path = args.input.with_suffix('.gif')
-
-    # Create GIF
-    try:
-        slopes, times, y_pos = create_gif(
-            ds,
-            output_path,
-            variable=args.variable,
-            cmap=args.cmap,
-            fps=args.fps,
-            dpi=args.dpi,
-            vmin=args.vmin,
-            vmax=args.vmax,
-            show_colorbar=not args.no_colorbar,
-            show_profile=not args.no_profile,
-            y_index=args.y_index,
-            x_max_relative=args.x_max,
-            metadata=metadata,
-        )
-
-        # Save slopes if requested
-        if args.save_slopes:
-            slopes_path = output_path.parent / (args.input.stem + '_slopes.nc')
-            save_slopes_to_nc(slopes, times, y_pos, args.x_max, slopes_path)
-
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        ds.close()
-        sys.exit(1)
     except Exception as e:
-        print(f"Error creating GIF: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
-        ds.close()
+        print(f"Error: Failed to load config: {e}", file=sys.stderr)
         sys.exit(1)
 
-    ds.close()
+    # Determine input directory
+    input_dir = config.process_folder / "level1"
+    if not input_dir.exists():
+        print(f"Error: Level1 directory not found: {input_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    # Determine output directory
+    if args.output is not None:
+        output_dir = args.output
+    else:
+        output_dir = config.plot_folder / "level1"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Discover NC files to process
+    if args.input is not None:
+        # Single file mode
+        input_path = Path(args.input)
+        if input_path.is_absolute():
+            nc_files = [input_path]
+        else:
+            # Treat as filename, look in input_dir
+            nc_files = [input_dir / input_path]
+
+        if not nc_files[0].exists():
+            print(f"Error: Input file not found: {nc_files[0]}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Discover all NC files in level1 directory
+        nc_files = sorted(input_dir.glob("L1_*.nc"))
+        if not nc_files:
+            print(f"No L1 NetCDF files found in: {input_dir}", file=sys.stderr)
+            sys.exit(1)
+
+    print(f"Found {len(nc_files)} L1 file(s) to process")
+    print(f"Input directory: {input_dir}")
+    print(f"Output directory: {output_dir}")
+
+    # Process each file
+    success_count = 0
+    fail_count = 0
+
+    for nc_path in nc_files:
+        output_path = output_dir / nc_path.with_suffix('.gif').name
+        if process_single_file(nc_path, output_path, args):
+            success_count += 1
+        else:
+            fail_count += 1
+
+    # Summary
+    print(f"\n{'='*70}")
+    print("Summary")
+    print(f"{'='*70}")
+    print(f"  Processed: {success_count}/{len(nc_files)} files")
+    if fail_count > 0:
+        print(f"  Failed: {fail_count} files")
+    print(f"  Output directory: {output_dir}")
     print("\nDone!")
 
 
