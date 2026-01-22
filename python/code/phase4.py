@@ -1498,17 +1498,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Process single L1 dataset
-  python phase4.py l1 config.json -o output.nc --start 2024-06-15 --end 2024-06-16
+  # Process single L1 dataset (use site-specific config from configs/)
+  python phase4.py l1 configs/do.json -o output.nc --start 2024-06-15 --end 2024-06-16
 
   # Process L2 wave data
-  python phase4.py l2 config.json -o l2_output.nc --start 2024-06-15T10:00 --end 2024-06-15T10:30
+  python phase4.py l2 configs/do.json -o l2_output.nc --start 2024-06-15T10:00 --end 2024-06-15T10:30
 
   # Batch process L1 with resume capability
-  python phase4.py batch config.json -o ./output/ --start 2024-06-01 --end 2024-06-30 --resume
+  python phase4.py batch configs/do.json -o ./output/ --start 2024-06-01 --end 2024-06-30 --resume
 
   # Batch process L2
-  python phase4.py batch-l2 config.json -o ./l2_output/ --start 2024-06-15 --end 2024-06-16
+  python phase4.py batch-l2 configs/do.json -o ./l2_output/ --start 2024-06-15 --end 2024-06-16
         """,
     )
 
@@ -1523,7 +1523,7 @@ Examples:
 
     # L1 command
     l1_parser = subparsers.add_parser("l1", help="Process L1 (hourly beach surface)", parents=[common_parser])
-    l1_parser.add_argument("config", type=Path, help="Path to config JSON")
+    l1_parser.add_argument("config", type=Path, help="Path to config JSON (e.g., configs/do.json)")
     l1_parser.add_argument("-o", "--output", type=Path, required=True, help="Output NetCDF path")
     l1_parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD or ISO format)")
     l1_parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD or ISO format)")
@@ -1535,7 +1535,7 @@ Examples:
 
     # L2 command
     l2_parser = subparsers.add_parser("l2", help="Process L2 (wave-resolving)", parents=[common_parser])
-    l2_parser.add_argument("config", type=Path, help="Path to config JSON")
+    l2_parser.add_argument("config", type=Path, help="Path to config JSON (e.g., configs/do.json)")
     l2_parser.add_argument("-o", "--output", type=Path, required=True, help="Output NetCDF path")
     l2_parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD or ISO format)")
     l2_parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD or ISO format)")
@@ -1548,7 +1548,7 @@ Examples:
 
     # Batch L1 command
     batch_parser = subparsers.add_parser("batch", help="Batch process L1 by day", parents=[common_parser])
-    batch_parser.add_argument("config", type=Path, help="Path to config JSON")
+    batch_parser.add_argument("config", type=Path, help="Path to config JSON (e.g., configs/do.json)")
     batch_parser.add_argument("-o", "--output-dir", type=Path, required=True, help="Output directory")
     batch_parser.add_argument("--start", type=str, required=True, help="Start date (YYYY-MM-DD)")
     batch_parser.add_argument("--end", type=str, required=True, help="End date (YYYY-MM-DD)")
@@ -1559,7 +1559,7 @@ Examples:
 
     # Batch L2 command
     batch_l2_parser = subparsers.add_parser("batch-l2", help="Batch process L2 by time window", parents=[common_parser])
-    batch_l2_parser.add_argument("config", type=Path, help="Path to config JSON")
+    batch_l2_parser.add_argument("config", type=Path, help="Path to config JSON (e.g., configs/do.json)")
     batch_l2_parser.add_argument("-o", "--output-dir", type=Path, required=True, help="Output directory")
     batch_l2_parser.add_argument("--start", type=str, required=True, help="Start datetime (YYYY-MM-DD or ISO)")
     batch_l2_parser.add_argument("--end", type=str, required=True, help="End datetime (YYYY-MM-DD or ISO)")

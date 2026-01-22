@@ -12,7 +12,7 @@ Usage:
     python scripts/run_daily_l2.py [options]
 
 Options:
-    --config PATH       Path to livox_config.json (default: livox_config.json)
+    --config PATH       Path to config file (default: configs/do.json)
     --output-dir DIR    Output directory (default: python/data/level2)
     --resume            Resume from checkpoint if available
     --verbose           Enable debug logging
@@ -61,14 +61,14 @@ def main():
         epilog="""
 Examples:
     python scripts/run_daily_l2.py
-    python scripts/run_daily_l2.py --config livox_config.json --resume
-    python scripts/run_daily_l2.py --start 2025-05-03 --end 2025-05-04
+    python scripts/run_daily_l2.py --config configs/do.json --resume
+    python scripts/run_daily_l2.py --config configs/newsite.json --start 2025-05-03
     python scripts/run_daily_l2.py --time-bin 0.25 --multi-transect
         """
     )
     parser.add_argument(
-        "--config", type=Path, default=Path("livox_config.json"),
-        help="Path to livox_config.json (default: livox_config.json)"
+        "--config", type=Path, default=Path("configs/do.json"),
+        help="Path to config file (default: configs/do.json). See configs/ for available site configs."
     )
     parser.add_argument(
         "--output-dir", type=Path, default=None,

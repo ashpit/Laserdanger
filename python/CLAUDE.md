@@ -17,14 +17,14 @@ pip install -r requirements.txt
 # Run tests
 pytest tests/ -v
 
-# Process L1 data (single day)
-python code/phase4.py l1 livox_config.json -o output.nc --start 2025-05-03 --end 2025-05-04
+# Process L1 data (single day) - use site/date-specific config from configs/
+python code/phase4.py l1 configs/do_livox_config_20260112.json -o output.nc --start 2026-01-12 --end 2026-01-13
 
 # Process L2 data (wave-resolving)
-python code/phase4.py l2 livox_config.json -o l2_output.nc --start 2025-05-03 --end 2025-05-04
+python code/phase4.py l2 configs/towr_livox_config_20260120.json -o l2_output.nc --start 2026-01-20 --end 2026-01-21
 
 # Batch processing with resume capability
-python code/phase4.py batch livox_config.json -o output_dir/ --start 2025-05-01 --end 2025-05-31
+python code/phase4.py batch configs/do_livox_config_20260112.json -o output_dir/ --start 2026-01-12 --end 2026-01-20
 ```
 
 ## Project Structure
@@ -40,6 +40,9 @@ python/
 │   ├── runup.py            # Runup detection and statistics
 │   ├── utils.py            # General utilities
 │   └── validation.py       # MATLAB comparison utilities
+├── configs/                 # Site/date-specific configuration files
+│   ├── do_livox_config_YYYYMMDD.json    # Director's Office site
+│   └── towr_livox_config_YYYYMMDD.json  # Tower site
 ├── tests/                   # Test suite (pytest)
 ├── scripts/                 # Verification and utility scripts
 ├── examples/                # Usage examples
@@ -122,7 +125,22 @@ python code/phase4.py batch CONFIG [OPTIONS]
   --parallel N          Use N parallel workers
 ```
 
-## Configuration File Format
+## Configuration
+
+Site and date-specific configs are stored in `configs/` with naming convention:
+`{site}_livox_config_{YYYYMMDD}.json`
+
+- `do` = Director's Office site
+- `towr` = Tower site
+- Date indicates when the transform matrix was calibrated (use config valid for your data's date range)
+
+To add a new site or update for a new calibration:
+```bash
+cp configs/do_livox_config_20260112.json configs/newsite_livox_config_20260122.json
+# Edit with new paths and transform matrix
+```
+
+### Config File Format
 
 ```json
 {

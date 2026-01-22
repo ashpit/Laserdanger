@@ -1,0 +1,49 @@
+{
+  "dataFolder": "/Volumes/camera/TOWR-lidar/surfside-test_20260120/lvx/",
+  "processFolder": "/Volumes/camera/TOWR-lidar/surfside-test_20260120/lvx_processed/",
+  "plotFolder": "/Volumes/camera/TOWR-lidar/surfside-test_20260120/lvx_figures/",
+  "LidarBoundary": [
+    [
+      476100,
+      3.63615E+6
+    ],
+    [
+      476250,
+      3.63615E+6
+    ],
+    [
+      476250,
+      3.6363E+6
+    ],
+    [
+      476100,
+      3.6363E+6
+    ]
+  ],
+  "transformMatrix": [
+    [
+      -0.792594,
+      -0.013987,
+      -0.60959,
+      476191.173586
+    ],
+    [
+      0.014471,
+      -0.999887,
+      0.004127,
+      3.636211847246E+6
+    ],
+    [
+      -0.609578,
+      -0.00555,
+      0.792706,
+      19.460627
+    ],
+    [
+      0,
+      0,
+      0,
+      1
+    ]
+  ]
+}
