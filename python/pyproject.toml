@@ -88,6 +88,10 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+filterwarnings = [
+    # Ignore numpy ABI compatibility warning (harmless with numpy 2.x + Python 3.14)
+    "ignore:numpy.ndarray size changed:RuntimeWarning",
+]
 
 [tool.black]
 line-length = 100
