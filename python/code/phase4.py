@@ -1396,12 +1396,23 @@ def process_l2_chunked(
             # Adjust time coordinates relative to global base time
             time_offset = (chunk_file_start - global_base_time).total_seconds()
             if time_offset > 0:
-                # Offset the time edges
-                chunk_result.grid.t_edges = chunk_result.grid.t_edges + time_offset
+                # Create new grid with offset time edges (TimeResolvedGrid is frozen)
+                offset_grid = phase2.TimeResolvedGrid(
+                    x_edges=chunk_result.grid.x_edges,
+                    t_edges=chunk_result.grid.t_edges + time_offset,
+                    z_mean=chunk_result.grid.z_mean,
+                    z_min=chunk_result.grid.z_min,
+                    z_max=chunk_result.grid.z_max,
+                    z_std=chunk_result.grid.z_std,
+                    count=chunk_result.grid.count,
+                    intensity_mean=chunk_result.grid.intensity_mean,
+                )
+            else:
+                offset_grid = chunk_result.grid
 
             # Update base_time to global base
             chunk_result = phase3.TimeResolvedDataset(
-                grid=chunk_result.grid,
+                grid=offset_grid,
                 base_time=global_base_time,
                 profile_config=chunk_result.profile_config,
                 transect_grids=chunk_result.transect_grids,
