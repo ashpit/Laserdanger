@@ -1720,8 +1720,12 @@ def process_l2_batch(
                 **kwargs,
             )
 
-            # Generate filename
-            filename = f"L2_{window_start.strftime('%Y%m%d')}.nc"
+            # Generate filename (with expansion rate suffix if applicable)
+            exp_rate = kwargs.get('expansion_rate')
+            if exp_rate is not None and exp_rate > 0:
+                filename = f"L2_{window_start.strftime('%Y%m%d')}_exp{int(exp_rate * 100):02d}.nc"
+            else:
+                filename = f"L2_{window_start.strftime('%Y%m%d')}.nc"
             output_path = output_dir / filename
             result.to_netcdf(output_path)
 

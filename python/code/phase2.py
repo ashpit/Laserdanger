@@ -265,8 +265,10 @@ def _bin_temporal_single_pass(
 
         if n > 1:
             # Optimized std: sqrt(mean(x²) - mean(x)²)
+            # Use max(0, ...) to handle floating point errors that can make variance slightly negative
             mean_val = z_mean[bt, bx]
-            z_std[bt, bx] = np.sqrt(np.mean(z_bin * z_bin) - mean_val * mean_val)
+            variance = np.mean(z_bin * z_bin) - mean_val * mean_val
+            z_std[bt, bx] = np.sqrt(max(0.0, variance))
         else:
             z_std[bt, bx] = 0.0
 
@@ -741,8 +743,10 @@ def _bin_with_percentile_filter(
 
         if nf > 1:
             # Use variance formula: std = sqrt(mean(x^2) - mean(x)^2)
+            # Use max(0, ...) to handle floating point errors that can make variance slightly negative
             mean_val = z_mean[bx, by]
-            z_std[bx, by] = np.sqrt(np.mean(z_filtered * z_filtered) - mean_val * mean_val)
+            variance = np.mean(z_filtered * z_filtered) - mean_val * mean_val
+            z_std[bx, by] = np.sqrt(max(0.0, variance))
         else:
             z_std[bx, by] = 0.0
 
