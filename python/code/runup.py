@@ -899,8 +899,22 @@ def detect_runup_multisignal(
 
     # Determine search direction based on coordinate system
     # Find which end has higher probability (water) on average
-    mean_prob_start = np.nanmean(P_water[:n_x//4, :])
-    mean_prob_end = np.nanmean(P_water[-n_x//4:, :])
+    start_slice = P_water[:n_x//4, :]
+    end_slice = P_water[-n_x//4:, :]
+
+    # Handle all-NaN slices gracefully
+    start_valid = ~np.isnan(start_slice)
+    end_valid = ~np.isnan(end_slice)
+
+    if start_valid.any():
+        mean_prob_start = np.nanmean(start_slice)
+    else:
+        mean_prob_start = 0.0
+
+    if end_valid.any():
+        mean_prob_end = np.nanmean(end_slice)
+    else:
+        mean_prob_end = 0.0
 
     # Search from water (high prob) toward land (low prob)
     search_seaward_to_landward = mean_prob_start > mean_prob_end
