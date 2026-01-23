@@ -145,6 +145,10 @@ def create_burst_gif(
     """
     Create animated GIF for a single burst showing profile + runup.
 
+    Two-panel figure:
+      - Left: Zoomed view centered on runup region
+      - Right: Full profile view
+
     Parameters
     ----------
     Z_burst : array (n_x, n_frames)
@@ -191,49 +195,71 @@ def create_burst_gif(
     z_min = np.percentile(z_valid, 1) - 0.3
     z_max = np.percentile(z_valid, 99) + 0.3
 
-    # Determine runup range for zooming
+    # Full profile limits
+    x_full_min = x1d.min()
+    x_full_max = x1d.max()
+
+    # Determine runup range for zoomed view
     runup_valid = X_runup[~np.isnan(X_runup)]
     if len(runup_valid) > 0:
         x_runup_min = np.percentile(runup_valid, 5)
         x_runup_max = np.percentile(runup_valid, 95)
         # Add padding
         x_range = x_runup_max - x_runup_min
-        x_plot_min = max(x1d.min(), x_runup_min - x_range * 0.5 - 5)
-        x_plot_max = min(x1d.max(), x_runup_max + x_range * 0.5 + 5)
+        x_zoom_min = max(x1d.min(), x_runup_min - x_range * 0.5 - 5)
+        x_zoom_max = min(x1d.max(), x_runup_max + x_range * 0.5 + 5)
     else:
-        x_plot_min = x1d.min()
-        x_plot_max = x1d.max()
+        # Fallback to middle portion
+        x_zoom_min = x1d.min()
+        x_zoom_max = x1d.max()
 
-    # Create figure
-    fig, ax = plt.subplots(figsize=(12, 6))
+    # Create two-panel figure
+    fig, (ax_zoom, ax_full) = plt.subplots(1, 2, figsize=(16, 6))
 
-    # Initialize plot elements
-    line_profile, = ax.plot([], [], 'b-', linewidth=1.5, label='Profile')
-    line_dry, = ax.plot([], [], 'g--', linewidth=1, alpha=0.7, label='Dry beach')
-    point_runup, = ax.plot([], [], 'ro', markersize=12, markeredgecolor='darkred',
-                           markeredgewidth=2, label='Runup', zorder=5)
+    # === Left panel: Zoomed view ===
+    line_profile_zoom, = ax_zoom.plot([], [], 'b-', linewidth=1.5, label='Profile')
+    line_dry_zoom, = ax_zoom.plot([], [], 'g--', linewidth=1, alpha=0.7, label='Dry beach')
+    point_runup_zoom, = ax_zoom.plot([], [], 'ro', markersize=12, markeredgecolor='darkred',
+                                      markeredgewidth=2, label='Runup', zorder=5)
+    ax_zoom.axhline(y=0, color='cyan', linestyle='-', linewidth=1, alpha=0.5, label='MWL')
 
-    # Add zero line (water level reference)
-    ax.axhline(y=0, color='cyan', linestyle='-', linewidth=1, alpha=0.5, label='MWL')
+    ax_zoom.set_xlim(x_zoom_min, x_zoom_max)
+    ax_zoom.set_ylim(z_min, z_max)
+    ax_zoom.set_xlabel('Cross-shore distance (m)', fontsize=11)
+    ax_zoom.set_ylabel('Elevation (m)', fontsize=11)
+    ax_zoom.set_title('Zoomed View (Runup Region)')
+    ax_zoom.legend(loc='upper right', fontsize=9)
+    ax_zoom.grid(True, alpha=0.3)
 
-    ax.set_xlim(x_plot_min, x_plot_max)
-    ax.set_ylim(z_min, z_max)
-    ax.set_xlabel('Cross-shore distance (m)', fontsize=11)
-    ax.set_ylabel('Elevation (m)', fontsize=11)
-    ax.legend(loc='upper right')
-    ax.grid(True, alpha=0.3)
-
-    # Title and info text
-    burst_start_min = burst_info['start_time'] / 60
-    title = ax.set_title('')
-
-    # Time and runup info text box
-    info_text = ax.text(
-        0.02, 0.98, '', transform=ax.transAxes,
+    # Info text on zoomed panel
+    info_text = ax_zoom.text(
+        0.02, 0.98, '', transform=ax_zoom.transAxes,
         fontsize=10, verticalalignment='top',
         fontfamily='monospace',
         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9)
     )
+
+    # === Right panel: Full profile ===
+    line_profile_full, = ax_full.plot([], [], 'b-', linewidth=1.5, label='Profile')
+    line_dry_full, = ax_full.plot([], [], 'g--', linewidth=1, alpha=0.7, label='Dry beach')
+    point_runup_full, = ax_full.plot([], [], 'ro', markersize=10, markeredgecolor='darkred',
+                                      markeredgewidth=2, label='Runup', zorder=5)
+    ax_full.axhline(y=0, color='cyan', linestyle='-', linewidth=1, alpha=0.5, label='MWL')
+
+    # Add shaded region showing zoom extent
+    ax_full.axvspan(x_zoom_min, x_zoom_max, alpha=0.15, color='yellow', label='Zoom region')
+
+    ax_full.set_xlim(x_full_min, x_full_max)
+    ax_full.set_ylim(z_min, z_max)
+    ax_full.set_xlabel('Cross-shore distance (m)', fontsize=11)
+    ax_full.set_ylabel('Elevation (m)', fontsize=11)
+    ax_full.set_title('Full Profile')
+    ax_full.legend(loc='upper right', fontsize=9)
+    ax_full.grid(True, alpha=0.3)
+
+    # Overall title
+    burst_start_min = burst_info['start_time'] / 60
+    suptitle = fig.suptitle('', fontsize=12, fontweight='bold')
 
     plt.tight_layout()
 
@@ -241,26 +267,32 @@ def create_burst_gif(
         """Update animation frame."""
         idx = frame_indices[frame_num]
 
-        # Update profile
+        # Get data for this frame
         profile = Z_burst[:, idx]
-        line_profile.set_data(x1d, profile)
-
-        # Update dry beach reference (it's 2D, extract column for this timestep)
         dry_ref = dry_beach[:, idx]
-        line_dry.set_data(x1d, dry_ref)
-
-        # Update runup point
         x_r = X_runup[idx]
         z_r = Z_runup[idx]
-        if not np.isnan(x_r) and not np.isnan(z_r):
-            point_runup.set_data([x_r], [z_r])
-        else:
-            point_runup.set_data([], [])
-
-        # Update title
         t_sec = time_burst[idx]
         t_min = t_sec / 60
-        title.set_text(f'Burst at {burst_start_min:.0f} min | t = {t_sec:.1f}s ({t_min:.2f} min)')
+
+        # Update zoomed panel
+        line_profile_zoom.set_data(x1d, profile)
+        line_dry_zoom.set_data(x1d, dry_ref)
+        if not np.isnan(x_r) and not np.isnan(z_r):
+            point_runup_zoom.set_data([x_r], [z_r])
+        else:
+            point_runup_zoom.set_data([], [])
+
+        # Update full panel
+        line_profile_full.set_data(x1d, profile)
+        line_dry_full.set_data(x1d, dry_ref)
+        if not np.isnan(x_r) and not np.isnan(z_r):
+            point_runup_full.set_data([x_r], [z_r])
+        else:
+            point_runup_full.set_data([], [])
+
+        # Update title
+        suptitle.set_text(f'Burst at {burst_start_min:.0f} min | t = {t_sec:.1f}s ({t_min:.2f} min)')
 
         # Update info text
         if not np.isnan(x_r):
@@ -278,7 +310,9 @@ def create_burst_gif(
             )
         info_text.set_text(info_str)
 
-        return [line_profile, line_dry, point_runup, title, info_text]
+        return [line_profile_zoom, line_dry_zoom, point_runup_zoom,
+                line_profile_full, line_dry_full, point_runup_full,
+                suptitle, info_text]
 
     # Create animation
     interval = 1000 / fps
