@@ -346,7 +346,7 @@ def main():
     plot_folder = adapt_path_for_os(config['plotFolder'])
 
     l2_input_dir = process_folder / 'level2'
-    l2_output_dir = plot_folder / 'level2'
+    l2_output_dir = plot_folder / 'level2' / 'pngs'
 
     if args.verbose:
         print(f"Config: {config_path.name}")

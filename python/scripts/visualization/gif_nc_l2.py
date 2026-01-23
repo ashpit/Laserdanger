@@ -93,6 +93,33 @@ def find_valid_bursts(
     return bursts
 
 
+def clean_dry_beach_reference(
+    dry_beach: np.ndarray,
+    Z_xt: np.ndarray,
+) -> np.ndarray:
+    """
+    Clean up dry beach reference to remove spikes from NaN interpolation.
+
+    - Clips dry beach to not exceed profile elevation
+    - Applies median filter to remove remaining spikes
+    """
+    from scipy.ndimage import median_filter
+
+    # Dry beach should never exceed the actual profile
+    dry_clean = np.minimum(dry_beach, Z_xt)
+
+    # Apply median filter along x-axis to remove spikes (kernel size 5)
+    for t in range(dry_clean.shape[1]):
+        col = dry_clean[:, t]
+        valid = ~np.isnan(col)
+        if valid.sum() > 5:
+            # Median filter on valid data
+            col_filtered = median_filter(col, size=5, mode='nearest')
+            dry_clean[:, t] = col_filtered
+
+    return dry_clean
+
+
 def detect_runup_for_burst(
     Z_xt: np.ndarray,
     x1d: np.ndarray,
@@ -125,6 +152,9 @@ def detect_runup_for_burst(
 
     # Compute dry beach reference for plotting (returns n_x, n_t)
     dry_beach = runup.compute_dry_beach_reference(Z_xt, dt, ig_length=ig_length)
+
+    # Clean up spikes in dry beach reference
+    dry_beach = clean_dry_beach_reference(dry_beach, Z_xt)
 
     return result.timeseries.X_runup, result.timeseries.Z_runup, dry_beach
 
@@ -512,11 +542,11 @@ def main():
         print(f"Error: Level2 directory not found: {input_dir}", file=sys.stderr)
         sys.exit(1)
 
-    # Determine output directory
+    # Determine output directory (gifs subfolder within level2)
     if args.output is not None:
         output_dir = args.output
     else:
-        output_dir = config.plot_folder / "level2"
+        output_dir = config.plot_folder / "level2" / "gifs"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Discover L2 files
