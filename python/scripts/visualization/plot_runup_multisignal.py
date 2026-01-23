@@ -21,6 +21,7 @@ import xarray as xr
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "code"))
 
+from phase1 import adapt_path_for_os
 import runup
 
 
@@ -340,9 +341,9 @@ def main():
     with open(config_path) as f:
         config = json.load(f)
 
-    # Determine paths from config
-    process_folder = Path(config['processFolder'])
-    plot_folder = Path(config['plotFolder'])
+    # Determine paths from config (adapt for OS)
+    process_folder = adapt_path_for_os(config['processFolder'])
+    plot_folder = adapt_path_for_os(config['plotFolder'])
 
     l2_input_dir = process_folder / 'level2'
     l2_output_dir = plot_folder / 'level2'
