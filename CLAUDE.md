@@ -161,6 +161,35 @@ Config file fields:
 - `plotFolder` - Output directory for figures and QC reports (level1/, level2/, qc/)
 - `transformMatrix` - 4×4 homogeneous transform (lidar → UTM)
 - `LidarBoundary` - Polygon vertices (UTM) for spatial filtering
+- `transect` - (optional) Cross-shore transect definition (see below)
+
+### Transect Configuration
+
+Both L1 and L2 processing **auto-compute** a cross-shore transect from the swath geometry if not specified. The auto-transect runs from the scanner position (extracted from `transformMatrix`) through the data centroid.
+
+To override, add a `transect` block to your config:
+
+```json
+{
+  "transect": {
+    "x1": 476190.0, "y1": 3636210.0,
+    "x2": 476120.0, "y2": 3636215.0,
+    "resolution": 0.1,
+    "tolerance": 2.0
+  }
+}
+```
+
+Or using origin + azimuth:
+```json
+{
+  "transect": {
+    "origin_x": 476190.0, "origin_y": 3636210.0,
+    "azimuth": 265.0,
+    "length": 80.0
+  }
+}
+```
 
 To add a new site, copy an existing config and update the paths and transform matrix.
 

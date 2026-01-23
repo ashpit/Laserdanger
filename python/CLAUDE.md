@@ -102,6 +102,9 @@ python/
 - `extract_transects(grid, x_edges, y_edges, config, alongshore_spacings)`
 - `inpaint_nans(z, x, max_gap)` - Gap interpolation
 - `TransectConfig` - Transect configuration dataclass
+- `get_scanner_position(transform_matrix)` - Extract scanner position from 4x4 transform
+- `compute_transect_from_swath(X, Y, transform_matrix)` - Auto-compute transect from swath geometry
+- `transect_config_from_dict(config_dict)` - Create TransectConfig from JSON dict
 
 ### runup.py - Runup Detection
 - `compute_runup_stats(Z_xt, I_xt, x1d, time_vec, ...)` - Full runup analysis
@@ -226,9 +229,26 @@ cp configs/do_livox_config_20260112.json configs/newsite_livox_config_20260122.j
     [r31, r32, r33, tz],
     [0, 0, 0, 1]
   ],
-  "LidarBoundary": [[x1, y1], [x2, y2], ..., [xn, yn]]
+  "LidarBoundary": [[x1, y1], [x2, y2], ..., [xn, yn]],
+  "transect": {
+    "x1": 476190.0, "y1": 3636210.0,
+    "x2": 476120.0, "y2": 3636215.0,
+    "resolution": 0.1,
+    "tolerance": 2.0
+  }
 }
 ```
+
+### Transect Auto-Computation
+
+If no `transect` is specified in the config, both L1 and L2 processing **auto-compute** a cross-shore transect from the lidar swath geometry:
+
+1. Scanner position is extracted from `transformMatrix` (the translation components tx, ty)
+2. Data centroid is computed from the point cloud
+3. Transect runs from scanner position through centroid, covering full data extent
+4. Profile orientation is automatically flipped so x=0 is at the seaward (low elevation) end
+
+This ensures consistent cross-shore profiles for slope calculation and wave runup analysis.
 
 ## Output Directory Structure
 
@@ -260,8 +280,9 @@ plotFolder/                     # Figures and QC reports
 - Variables: `z_mean`, `z_max`, `z_min`, `z_mode`, `z_std`, `count`
 
 ### L2 NetCDF Output
-- Coordinates: `x`, `time`
-- Variables: `Z` (elevation), `I` (intensity), `outlier_mask` (optional)
+- Coordinates: `x` (cross-shore distance along transect), `time`
+- Variables: `elevation`, `intensity`, `count`, `elevation_min`, `elevation_max`, `elevation_std`, `outlier_mask` (optional)
+- Note: `x` is cross-shore distance (0 = seaward end) when processed with auto-transect
 
 ### Validation Report JSON
 ```json
