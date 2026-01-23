@@ -760,7 +760,7 @@ def detect_runup_line(
     For each time step:
     1. Compute water level = Z - dry_beach
     2. Apply median filter for stability
-    3. Find seaward-most crossing of threshold
+    3. Find landward-most crossing of threshold (maximum inland water extent)
     4. Use adaptive search window around previous position
 
     Parameters
@@ -1384,18 +1384,20 @@ def _find_threshold_crossing(
     search_hi: int,
 ) -> int:
     """
-    Find the seaward-most (largest index) threshold crossing.
+    Find the landward-most (smallest index) threshold crossing.
+
+    For runup detection, we want the maximum inland extent of water,
+    which is the first dry-to-wet transition when searching from
+    landward to seaward.
 
     Returns -1 if no crossing found.
     """
-    # Search from seaward to landward (high to low index)
-    for i in range(search_hi, search_lo, -1):
+    # Search from landward to seaward (low to high index)
+    # First crossing found = landward-most = runup position
+    for i in range(search_lo, search_hi):
         if i < len(water_level) - 1:
-            # Check for crossing from below threshold to above
+            # Check for crossing from below threshold to above (dry to wet)
             if water_level[i] <= threshold < water_level[i + 1]:
-                return i
-            # Or from above to below
-            if water_level[i] >= threshold > water_level[i + 1]:
                 return i
 
     return -1

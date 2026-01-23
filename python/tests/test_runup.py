@@ -304,13 +304,27 @@ def test_moving_min_nan_basic():
 
 
 def test_find_threshold_crossing():
-    """Test threshold crossing detection."""
+    """Test threshold crossing detection finds landward-most (smallest index) crossing."""
+    # Profile: dry, dry, WET, WET, WET, dry
     water_level = np.array([0.05, 0.08, 0.12, 0.15, 0.11, 0.07])
 
-    # Crossing from below to above at index 1-2
+    # Threshold = 0.1
+    # Crossing from below to above at index 1→2 (landward-most, this is runup)
+    # Crossing from above to below at index 4→5 (seaward-most)
     idx = runup._find_threshold_crossing(water_level, 0.1, 0, 5)
 
-    assert idx >= 0  # Should find a crossing
+    # Should find the landward-most crossing (index 1) for runup detection
+    assert idx == 1
+
+    # Test with only one crossing
+    water_level_simple = np.array([0.05, 0.08, 0.12, 0.15, 0.18])
+    idx_simple = runup._find_threshold_crossing(water_level_simple, 0.1, 0, 4)
+    assert idx_simple == 1
+
+    # Test with no crossing (all below threshold)
+    water_level_dry = np.array([0.05, 0.06, 0.07, 0.08])
+    idx_dry = runup._find_threshold_crossing(water_level_dry, 0.1, 0, 3)
+    assert idx_dry == -1
 
 
 def test_interp_small_gaps():
