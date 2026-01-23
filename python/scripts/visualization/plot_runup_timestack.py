@@ -17,6 +17,9 @@ Usage:
     # Custom time window
     python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --t-start 200 --t-end 360
 
+    # Save runup time series to JSON
+    python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --save-runup
+
 Options:
     --config PATH       Path to config file (required)
     --input FILE        Process single file (filename only, looked up in processFolder/level2/)
@@ -25,8 +28,10 @@ Options:
     --figsize W H       Figure size in inches (default: 12 4)
     --t-start FLOAT     Start time in seconds (default: auto)
     --t-end FLOAT       End time in seconds (default: auto)
+    --save-runup        Save runup time series to JSON (processFolder/runup/)
 """
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -35,6 +40,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
 from scipy.ndimage import uniform_filter1d
+from scipy.signal import medfilt
 import xarray as xr
 
 # Add code directory to path
@@ -42,6 +48,201 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "code"))
 
 from phase1 import load_config
 import runup
+
+
+def filter_runup_outliers(
+    time_sec: np.ndarray,
+    X_runup: np.ndarray,
+    Z_runup: np.ndarray,
+    max_velocity: float = 5.0,
+    median_window_sec: float = 10.0,
+    max_deviation_m: float = 10.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Filter outliers from runup time series.
+
+    Removes points that:
+    1. Jump too fast (exceed max_velocity in m/s)
+    2. Deviate too far from the rolling median
+
+    Parameters
+    ----------
+    time_sec : array (n_t,)
+        Time in seconds
+    X_runup : array (n_t,)
+        Cross-shore runup position (m)
+    Z_runup : array (n_t,)
+        Runup elevation (m)
+    max_velocity : float
+        Maximum allowed runup velocity in m/s (default 5.0)
+    median_window_sec : float
+        Window for rolling median in seconds (default 10.0)
+    max_deviation_m : float
+        Maximum allowed deviation from rolling median in meters (default 10.0)
+
+    Returns
+    -------
+    X_filtered, Z_filtered : arrays (n_t,)
+        Filtered runup time series with outliers set to NaN
+    """
+    X_filt = X_runup.copy()
+    Z_filt = Z_runup.copy()
+    n_t = len(X_filt)
+
+    if n_t < 5:
+        return X_filt, Z_filt
+
+    dt = np.median(np.diff(time_sec))
+    if dt <= 0:
+        dt = 0.5
+
+    # Step 1: Remove velocity outliers (points that jump too fast)
+    max_jump = max_velocity * dt  # max distance per timestep
+
+    for i in range(1, n_t):
+        if np.isnan(X_filt[i]) or np.isnan(X_filt[i-1]):
+            continue
+        jump = abs(X_filt[i] - X_filt[i-1])
+        if jump > max_jump:
+            # Mark as outlier
+            X_filt[i] = np.nan
+            Z_filt[i] = np.nan
+
+    # Step 2: Remove points that deviate too far from rolling median
+    valid = ~np.isnan(X_filt)
+    if valid.sum() < 10:
+        return X_filt, Z_filt
+
+    # Compute rolling median using scipy
+    window_samples = max(5, int(median_window_sec / dt))
+    if window_samples % 2 == 0:
+        window_samples += 1
+
+    # Create a temporary array with NaN filled by nearest valid
+    X_temp = X_filt.copy()
+    valid_idx = np.where(valid)[0]
+    if len(valid_idx) > 0:
+        # Forward fill then backward fill
+        for i in range(n_t):
+            if np.isnan(X_temp[i]):
+                # Find nearest valid
+                distances = np.abs(valid_idx - i)
+                nearest = valid_idx[np.argmin(distances)]
+                X_temp[i] = X_filt[nearest]
+
+    # Compute rolling median
+    X_median = medfilt(X_temp, kernel_size=window_samples)
+
+    # Mark outliers based on deviation from median
+    for i in range(n_t):
+        if np.isnan(X_filt[i]):
+            continue
+        deviation = abs(X_filt[i] - X_median[i])
+        if deviation > max_deviation_m:
+            X_filt[i] = np.nan
+            Z_filt[i] = np.nan
+
+    # Step 3: Interpolate small gaps (up to 3 samples)
+    X_filt = _interp_small_gaps(X_filt, max_gap=3)
+    Z_filt = _interp_small_gaps(Z_filt, max_gap=3)
+
+    return X_filt, Z_filt
+
+
+def _interp_small_gaps(arr: np.ndarray, max_gap: int) -> np.ndarray:
+    """Interpolate small gaps in 1D array."""
+    result = arr.copy()
+    valid = ~np.isnan(arr)
+
+    if valid.sum() < 2:
+        return result
+
+    valid_idx = np.where(valid)[0]
+
+    for j in range(len(valid_idx) - 1):
+        start = valid_idx[j]
+        end = valid_idx[j + 1]
+        gap_size = end - start - 1
+
+        if 0 < gap_size <= max_gap:
+            x_interp = np.arange(start, end + 1)
+            result[start:end + 1] = np.interp(
+                x_interp,
+                [start, end],
+                [result[start], result[end]],
+            )
+
+    return result
+
+
+def save_runup_json(
+    time_sec: np.ndarray,
+    X_runup: np.ndarray,
+    Z_runup: np.ndarray,
+    X_smooth: np.ndarray,
+    output_path: Path,
+    burst_info: dict,
+    metadata: Optional[dict] = None,
+) -> None:
+    """
+    Save runup time series to JSON file.
+
+    Parameters
+    ----------
+    time_sec : array (n_t,)
+        Time in seconds
+    X_runup : array (n_t,)
+        Cross-shore runup position (m)
+    Z_runup : array (n_t,)
+        Runup elevation (m)
+    X_smooth : array (n_t,)
+        Smoothed runup position (m)
+    output_path : Path
+        Output JSON file path
+    burst_info : dict
+        Burst metadata
+    metadata : dict, optional
+        Additional metadata to include
+    """
+    # Convert arrays to lists, replacing NaN with None for JSON compatibility
+    def to_json_list(arr):
+        return [None if np.isnan(v) else float(v) for v in arr]
+
+    data = {
+        "burst": {
+            "start_time_sec": float(burst_info['start_time']),
+            "end_time_sec": float(burst_info['end_time']),
+            "duration_sec": float(burst_info['duration_sec']),
+            "n_samples": int(burst_info['n_frames']),
+        },
+        "time_sec": to_json_list(time_sec),
+        "X_runup_m": to_json_list(X_runup),
+        "Z_runup_m": to_json_list(Z_runup),
+        "X_smooth_m": to_json_list(X_smooth),
+    }
+
+    if metadata:
+        data["metadata"] = metadata
+
+    # Compute summary statistics
+    valid = ~np.isnan(X_runup) & ~np.isnan(Z_runup)
+    if valid.sum() > 0:
+        data["stats"] = {
+            "n_valid": int(valid.sum()),
+            "X_min_m": float(np.nanmin(X_runup)),
+            "X_max_m": float(np.nanmax(X_runup)),
+            "X_mean_m": float(np.nanmean(X_runup)),
+            "X_std_m": float(np.nanstd(X_runup)),
+            "Z_min_m": float(np.nanmin(Z_runup)),
+            "Z_max_m": float(np.nanmax(Z_runup)),
+            "Z_mean_m": float(np.nanmean(Z_runup)),
+            "Z_std_m": float(np.nanstd(Z_runup)),
+            "Z_R2_m": float(np.nanpercentile(Z_runup, 98)),  # 2% exceedance
+        }
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w') as f:
+        json.dump(data, f, indent=2)
 
 
 def find_valid_bursts(
@@ -310,6 +511,8 @@ def process_l2_file(
     figsize: Tuple[float, float] = (12, 4),
     t_start: Optional[float] = None,
     t_end: Optional[float] = None,
+    save_runup: bool = False,
+    runup_dir: Optional[Path] = None,
     verbose: bool = True,
 ) -> int:
     """
@@ -395,9 +598,46 @@ def process_l2_file(
             print(f"    WARNING: Runup detection failed: {ex}")
             continue
 
+        # Filter outliers (spikes into backbeach)
+        n_before = np.sum(~np.isnan(X_runup))
+        X_runup, Z_runup = filter_runup_outliers(
+            time_burst, X_runup, Z_runup,
+            max_velocity=5.0,      # m/s - max physical runup speed
+            median_window_sec=10.0,  # rolling median window
+            max_deviation_m=10.0,   # max deviation from median
+        )
+        n_after = np.sum(~np.isnan(X_runup))
+        if verbose and n_before > n_after:
+            print(f"    Filtered {n_before - n_after} outliers ({100*(n_before-n_after)/n_before:.1f}%)")
+
+        # Compute smoothed runup
+        X_smooth = X_runup.copy()
+        valid_idx = ~np.isnan(X_smooth)
+        if valid_idx.sum() > 10:
+            kernel_size = min(11, valid_idx.sum() // 3)
+            if kernel_size >= 3:
+                X_smooth[valid_idx] = uniform_filter1d(
+                    X_smooth[valid_idx], kernel_size, mode='nearest'
+                )
+
         # Generate output filename (same naming as gif_nc_l2.py)
         burst_time_min = int(burst['start_time'] / 60)
         output_path = date_output_dir / f"{burst_time_min:04d}min.png"
+
+        # Save runup JSON if requested
+        if save_runup and runup_dir is not None:
+            json_output_dir = runup_dir / date_str
+            json_path = json_output_dir / f"{burst_time_min:04d}min.json"
+            try:
+                save_runup_json(
+                    time_burst, X_runup, Z_runup, X_smooth,
+                    json_path, burst,
+                    metadata={"source_file": l2_path.name},
+                )
+                if verbose:
+                    print(f"    Saved runup: {json_path.name}")
+            except Exception as ex:
+                print(f"    WARNING: Failed to save runup JSON: {ex}")
 
         # Create plot
         try:
@@ -470,6 +710,11 @@ def main():
         help="End time in seconds (default: auto)"
     )
     parser.add_argument(
+        "--save-runup",
+        action="store_true",
+        help="Save runup time series to JSON (processFolder/runup/)"
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Verbose output"
@@ -501,6 +746,11 @@ def main():
         output_dir = config.plot_folder / "level2" / "pngs"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Determine runup output directory
+    runup_dir = config.process_folder / "runup" if args.save_runup else None
+    if runup_dir:
+        runup_dir.mkdir(parents=True, exist_ok=True)
+
     # Discover L2 files
     if args.input is not None:
         input_path = Path(args.input)
@@ -520,7 +770,9 @@ def main():
 
     print(f"Found {len(l2_files)} L2 file(s) to process")
     print(f"Input directory: {input_dir}")
-    print(f"Output directory: {output_dir}")
+    print(f"PNG output: {output_dir}")
+    if args.save_runup:
+        print(f"Runup JSON output: {runup_dir}")
 
     # Process each file
     total_pngs = 0
@@ -531,6 +783,8 @@ def main():
             figsize=tuple(args.figsize),
             t_start=args.t_start,
             t_end=args.t_end,
+            save_runup=args.save_runup,
+            runup_dir=runup_dir,
             verbose=args.verbose or len(l2_files) == 1,
         )
         total_pngs += n_pngs
@@ -541,7 +795,9 @@ def main():
     print(f"{'='*60}")
     print(f"  Files processed: {len(l2_files)}")
     print(f"  PNGs created: {total_pngs}")
-    print(f"  Output directory: {output_dir}")
+    print(f"  PNG output: {output_dir}")
+    if args.save_runup:
+        print(f"  Runup JSON output: {runup_dir}")
     print("\nDone!")
 
 
