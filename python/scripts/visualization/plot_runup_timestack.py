@@ -2,10 +2,10 @@
 """
 Create runup timestack plots from L2 NetCDF files.
 
-For each burst (contiguous region with valid data), creates a scatter plot showing:
-  - X-axis: time in seconds
-  - Y-axis: runup cross-shore position (m)
-  - Points colored by runup elevation
+For each burst (contiguous region with valid data), creates a timestack figure showing:
+  - Background: Z(x,t) elevation heatmap
+  - Overlay: runup line (black) with markers (red dots)
+  - Optional: smoothed runup line (white dashed)
 
 Usage:
     # Process all L2 files from config
@@ -14,12 +14,17 @@ Usage:
     # Process single file
     python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --input L2_20260120.nc
 
+    # Custom time window
+    python scripts/visualization/plot_runup_timestack.py --config configs/towr_livox_config_20260120.json --t-start 200 --t-end 360
+
 Options:
     --config PATH       Path to config file (required)
     --input FILE        Process single file (filename only, looked up in processFolder/level2/)
     --output PATH       Output directory for PNGs (default: plotFolder/level2/pngs/)
     --dpi DPI           Resolution (default: 150)
-    --figsize W H       Figure size in inches (default: 12 6)
+    --figsize W H       Figure size in inches (default: 12 4)
+    --t-start FLOAT     Start time in seconds (default: auto)
+    --t-end FLOAT       End time in seconds (default: auto)
 """
 import argparse
 import sys
@@ -27,8 +32,9 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 import numpy as np
+from scipy.ndimage import uniform_filter1d
 import xarray as xr
 
 # Add code directory to path
@@ -120,24 +126,32 @@ def detect_runup_for_burst(
 
 
 def create_runup_timestack_plot(
+    Z_burst: np.ndarray,
+    x1d: np.ndarray,
     time_burst: np.ndarray,
     X_runup: np.ndarray,
     Z_runup: np.ndarray,
     output_path: Path,
     burst_info: dict,
     dpi: int = 150,
-    figsize: Tuple[float, float] = (12, 6),
+    figsize: Tuple[float, float] = (12, 4),
+    t_start: Optional[float] = None,
+    t_end: Optional[float] = None,
 ) -> bool:
     """
-    Create runup timestack scatter plot for a single burst.
+    Create runup timestack plot with elevation heatmap background.
 
     Parameters
     ----------
-    time_burst : array (n_frames,)
+    Z_burst : array (n_x, n_t)
+        Elevation timestack
+    x1d : array (n_x,)
+        Cross-shore positions
+    time_burst : array (n_t,)
         Time values for this burst (seconds)
-    X_runup : array (n_frames,)
+    X_runup : array (n_t,)
         Cross-shore runup position
-    Z_runup : array (n_frames,)
+    Z_runup : array (n_t,)
         Runup elevation
     output_path : Path
         Output PNG path
@@ -147,6 +161,8 @@ def create_runup_timestack_plot(
         Resolution
     figsize : tuple
         Figure size (width, height) in inches
+    t_start, t_end : float, optional
+        Time window to plot (default: full burst)
 
     Returns
     -------
@@ -157,57 +173,128 @@ def create_runup_timestack_plot(
     if valid.sum() < 5:
         return False
 
-    t_valid = time_burst[valid]
-    x_valid = X_runup[valid]
-    z_valid = Z_runup[valid]
+    # Apply time window if specified
+    if t_start is not None or t_end is not None:
+        t0 = t_start if t_start is not None else time_burst[0]
+        t1 = t_end if t_end is not None else time_burst[-1]
+        time_mask = (time_burst >= t0) & (time_burst <= t1)
+
+        Z_burst = Z_burst[:, time_mask]
+        time_burst = time_burst[time_mask]
+        X_runup = X_runup[time_mask]
+        Z_runup = Z_runup[time_mask]
+        valid = valid[time_mask]
+
+    if len(time_burst) < 5:
+        return False
+
+    # Determine x-axis limits from runup range (with padding)
+    runup_valid = X_runup[~np.isnan(X_runup)]
+    if len(runup_valid) < 5:
+        return False
+
+    x_margin = 5.0  # meters padding
+    x_min = max(x1d.min(), runup_valid.min() - x_margin)
+    x_max = min(x1d.max(), runup_valid.max() + x_margin)
+
+    # Subset x to focus on runup region
+    x_mask = (x1d >= x_min) & (x1d <= x_max)
+    x_subset = x1d[x_mask]
+    Z_subset = Z_burst[x_mask, :]
 
     # Create figure
     fig, ax = plt.subplots(figsize=figsize)
 
-    # Scatter plot with elevation colormap
-    scatter = ax.scatter(
-        t_valid, x_valid,
-        c=z_valid,
-        cmap='viridis',
-        s=10,
-        alpha=0.7,
-        edgecolors='none',
+    # Background: elevation heatmap using pcolormesh
+    # Need to create mesh edges for pcolormesh
+    dt = np.median(np.diff(time_burst))
+    dx = np.median(np.diff(x_subset)) if len(x_subset) > 1 else 0.1
+
+    t_edges = np.concatenate([
+        [time_burst[0] - dt/2],
+        (time_burst[:-1] + time_burst[1:]) / 2,
+        [time_burst[-1] + dt/2]
+    ])
+    x_edges = np.concatenate([
+        [x_subset[0] - dx/2],
+        (x_subset[:-1] + x_subset[1:]) / 2,
+        [x_subset[-1] + dx/2]
+    ])
+
+    # Determine color limits from data
+    z_valid = Z_subset[~np.isnan(Z_subset)]
+    if len(z_valid) > 0:
+        vmin = np.percentile(z_valid, 2)
+        vmax = np.percentile(z_valid, 98)
+    else:
+        vmin, vmax = -1, 1
+
+    # Plot heatmap (note: pcolormesh expects Z_subset as (n_x, n_t))
+    mesh = ax.pcolormesh(
+        t_edges, x_edges, Z_subset,
+        cmap='RdYlBu_r',  # Blue (low/water) to red (high/land)
+        vmin=vmin, vmax=vmax,
+        shading='flat',
+        rasterized=True,
     )
 
     # Colorbar
-    cbar = plt.colorbar(scatter, ax=ax, pad=0.02)
-    cbar.set_label('Runup Elevation (m)', fontsize=11)
+    cbar = plt.colorbar(mesh, ax=ax, pad=0.02)
+    cbar.set_label('Elevation (m)', fontsize=11)
 
-    # Labels and title
-    ax.set_xlabel('Time (s)', fontsize=12)
-    ax.set_ylabel('Runup Position (m)', fontsize=12)
+    # Compute smoothed runup for white dashed line
+    X_smooth = X_runup.copy()
+    valid_idx = ~np.isnan(X_smooth)
+    if valid_idx.sum() > 10:
+        # Apply uniform filter (moving average) to valid data
+        kernel_size = min(11, valid_idx.sum() // 3)
+        if kernel_size >= 3:
+            X_smooth[valid_idx] = uniform_filter1d(
+                X_smooth[valid_idx], kernel_size, mode='nearest'
+            )
 
-    burst_start_min = burst_info['start_time'] / 60
-    duration_min = burst_info['duration_sec'] / 60
-    ax.set_title(
-        f"Runup Timestack | Burst at {burst_start_min:.0f} min "
-        f"({duration_min:.1f} min duration)",
-        fontsize=12,
-        fontweight='bold',
+    # Overlay: smoothed runup line (white dashed, plotted first so it's behind)
+    ax.plot(
+        time_burst, X_smooth,
+        'w--', linewidth=1.5, alpha=0.8,
+        label='Smoothed',
     )
 
-    ax.grid(True, alpha=0.3)
+    # Overlay: raw runup line (black solid)
+    ax.plot(
+        time_burst, X_runup,
+        'k-', linewidth=1.0, alpha=0.9,
+        label='Runup',
+    )
 
-    # Add stats text box
-    stats_text = (
-        f"N points: {valid.sum()}\n"
-        f"X range: [{x_valid.min():.1f}, {x_valid.max():.1f}] m\n"
-        f"Z range: [{z_valid.min():.2f}, {z_valid.max():.2f}] m\n"
-        f"Z mean: {z_valid.mean():.2f} m"
+    # Overlay: red dots at runup positions (subsample if too many)
+    n_points = valid.sum()
+    if n_points > 200:
+        # Subsample to ~100 points
+        step = n_points // 100
+        plot_mask = np.zeros_like(valid)
+        valid_indices = np.where(valid)[0]
+        plot_mask[valid_indices[::step]] = True
+    else:
+        plot_mask = valid
+
+    ax.scatter(
+        time_burst[plot_mask], X_runup[plot_mask],
+        c='red', s=15, alpha=0.8,
+        edgecolors='darkred', linewidths=0.5,
+        zorder=5,
     )
-    ax.text(
-        0.02, 0.98, stats_text,
-        transform=ax.transAxes,
-        fontsize=9,
-        verticalalignment='top',
-        fontfamily='monospace',
-        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9),
-    )
+
+    # Labels and formatting
+    ax.set_xlabel('time (s)', fontsize=12)
+    ax.set_ylabel('x-shore distance (m)', fontsize=12)
+
+    # Set axis limits
+    ax.set_xlim(time_burst[0], time_burst[-1])
+    ax.set_ylim(x_max, x_min)  # Inverted so land (high x) is at bottom
+
+    # Legend (compact, in corner)
+    ax.legend(loc='lower right', fontsize=8, framealpha=0.9)
 
     plt.tight_layout()
     fig.savefig(output_path, dpi=dpi, bbox_inches='tight')
@@ -220,7 +307,9 @@ def process_l2_file(
     l2_path: Path,
     output_dir: Path,
     dpi: int = 150,
-    figsize: Tuple[float, float] = (12, 6),
+    figsize: Tuple[float, float] = (12, 4),
+    t_start: Optional[float] = None,
+    t_end: Optional[float] = None,
     verbose: bool = True,
 ) -> int:
     """
@@ -313,9 +402,11 @@ def process_l2_file(
         # Create plot
         try:
             success = create_runup_timestack_plot(
-                time_burst, X_runup, Z_runup,
+                Z_burst, x1d, time_burst,
+                X_runup, Z_runup,
                 output_path, burst,
                 dpi=dpi, figsize=figsize,
+                t_start=t_start, t_end=t_end,
             )
             if success:
                 n_created += 1
@@ -362,9 +453,21 @@ def main():
         "--figsize",
         type=float,
         nargs=2,
-        default=[12, 6],
+        default=[12, 4],
         metavar=('W', 'H'),
-        help="Figure size in inches (default: 12 6)"
+        help="Figure size in inches (default: 12 4)"
+    )
+    parser.add_argument(
+        "--t-start",
+        type=float,
+        default=None,
+        help="Start time in seconds (default: auto)"
+    )
+    parser.add_argument(
+        "--t-end",
+        type=float,
+        default=None,
+        help="End time in seconds (default: auto)"
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -426,6 +529,8 @@ def main():
             l2_path, output_dir,
             dpi=args.dpi,
             figsize=tuple(args.figsize),
+            t_start=args.t_start,
+            t_end=args.t_end,
             verbose=args.verbose or len(l2_files) == 1,
         )
         total_pngs += n_pngs
