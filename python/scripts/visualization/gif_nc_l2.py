@@ -93,14 +93,16 @@ def find_valid_bursts(
     return bursts
 
 
-def detect_runup_simple(
+def detect_runup_for_burst(
     Z_xt: np.ndarray,
     x1d: np.ndarray,
+    time_sec: np.ndarray,
     I_xt: Optional[np.ndarray] = None,
     threshold: float = 0.1,
+    ig_length: float = 100.0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Detect runup position for each timestep.
+    Detect runup position for each timestep (same method as plot_runup_multisignal.py).
 
     Returns
     -------
@@ -112,17 +114,18 @@ def detect_runup_simple(
         Dry beach reference elevation
     """
     n_x, n_t = Z_xt.shape
-    dt = 0.5  # Assume 2Hz data
+    dt = time_sec[1] - time_sec[0] if len(time_sec) > 1 else 0.5
 
-    # Compute dry beach reference (moving minimum)
-    dry_beach = runup.compute_dry_beach_reference(Z_xt, dt, window_s=100.0)
-
-    # Compute runup stats (includes detection)
+    # Compute runup stats (same as plot_runup_multisignal.py)
     result = runup.compute_runup_stats(
-        Z_xt, x1d, np.arange(n_t) * dt,
+        Z_xt, x1d, time_sec,
         I_xt=I_xt,
         threshold=threshold,
+        ig_length=ig_length,
     )
+
+    # Compute dry beach reference for plotting
+    dry_beach = runup.compute_dry_beach_reference(Z_xt, dt, ig_length=ig_length)
 
     return result.timeseries.X_runup, result.timeseries.Z_runup, dry_beach
 
@@ -373,10 +376,10 @@ def process_l2_file(
         time_burst = time_sec[s:e]
         I_burst = I_xt[:, s:e] if I_xt is not None else None
 
-        # Detect runup for this burst
+        # Detect runup for this burst (same method as plot_runup_multisignal.py)
         try:
-            X_runup, Z_runup, dry_beach = detect_runup_simple(
-                Z_burst, x1d, I_xt=I_burst
+            X_runup, Z_runup, dry_beach = detect_runup_for_burst(
+                Z_burst, x1d, time_burst, I_xt=I_burst
             )
         except Exception as ex:
             print(f"    WARNING: Runup detection failed: {ex}")
