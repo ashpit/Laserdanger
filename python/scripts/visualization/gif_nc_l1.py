@@ -375,17 +375,37 @@ def extract_transect_profile(
     time_idx: int,
     transect_config: 'profiles.TransectConfig',
     x_max_relative: float = 20.0,
-    elevation_var: str = 'elevation'
-) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    elevation_var: str = 'elevation',
+    flip_profile: Optional[bool] = None,
+) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
     """
     Extract profile along a transect line from 2D gridded data.
 
     Interpolates the grid data along the transect centerline.
+    The profile is oriented so x=0 is at the SEAWARD (low elevation) end,
+    which is required for proper foreshore slope calculation.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        L1 dataset with x, y coordinates and elevation data
+    time_idx : int
+        Time index to extract
+    transect_config : TransectConfig
+        Transect configuration
+    x_max_relative : float
+        Max cross-shore distance for slope fit (m)
+    elevation_var : str
+        Name of elevation variable
+    flip_profile : bool, optional
+        If True, flip profile so seaward is at x=0.
+        If False, don't flip.
+        If None (default), auto-detect from elevation data.
 
     Returns
     -------
     x1d : array
-        Cross-shore distance along transect
+        Cross-shore distance along transect (0 = seaward end)
     profile : array
         Elevation profile
     slope : float
@@ -395,9 +415,11 @@ def extract_transect_profile(
     z_fit : array
         Z values for fit line
     transect_x_utm : array
-        UTM X coordinates of transect
+        UTM X coordinates of transect (ordered seaward to landward)
     transect_y_utm : array
-        UTM Y coordinates of transect
+        UTM Y coordinates of transect (ordered seaward to landward)
+    did_flip : bool
+        Whether the profile was flipped (useful for caching this decision)
     """
     from scipy.interpolate import RegularGridInterpolator
 
@@ -436,21 +458,44 @@ def extract_transect_profile(
         (transect_config.y2 - transect_config.y1)**2
     )
     n_points = int(transect_length / transect_config.resolution) + 1
-    x1d = np.linspace(0, transect_length, n_points)
+    x1d_raw = np.linspace(0, transect_length, n_points)
 
-    # UTM coordinates along transect
-    t = x1d / transect_length
-    transect_x_utm = transect_config.x1 + t * (transect_config.x2 - transect_config.x1)
-    transect_y_utm = transect_config.y1 + t * (transect_config.y2 - transect_config.y1)
+    # UTM coordinates along transect (from x1,y1 to x2,y2)
+    t = x1d_raw / transect_length
+    transect_x_utm_raw = transect_config.x1 + t * (transect_config.x2 - transect_config.x1)
+    transect_y_utm_raw = transect_config.y1 + t * (transect_config.y2 - transect_config.y1)
 
     # Interpolate elevations along transect
-    points = np.column_stack([transect_y_utm, transect_x_utm])
-    profile = interpolator(points)
+    points = np.column_stack([transect_y_utm_raw, transect_x_utm_raw])
+    profile_raw = interpolator(points)
 
-    # Calculate slope
+    # Determine flip direction
+    if flip_profile is None:
+        # Auto-detect: compare mean elevation of first 10% vs last 10%
+        n_check = max(1, n_points // 10)
+        elev_start = np.nanmean(profile_raw[:n_check])
+        elev_end = np.nanmean(profile_raw[-n_check:])
+        # Flip if start has higher elevation than end
+        # (we want x=0 at the seaward/low elevation end)
+        flip_profile = elev_start > elev_end
+
+    if flip_profile:
+        # Flip everything so seaward end is at x=0
+        x1d = x1d_raw  # Keep same distances
+        profile = profile_raw[::-1]
+        transect_x_utm = transect_x_utm_raw[::-1]
+        transect_y_utm = transect_y_utm_raw[::-1]
+    else:
+        # Already correct orientation
+        x1d = x1d_raw
+        profile = profile_raw
+        transect_x_utm = transect_x_utm_raw
+        transect_y_utm = transect_y_utm_raw
+
+    # Calculate slope (now x=0 is at seaward end, so first 20m is foreshore)
     slope, x_fit, z_fit = calculate_slope(x1d, profile, x_max_relative=x_max_relative)
 
-    return x1d, profile, slope, x_fit, z_fit, transect_x_utm, transect_y_utm
+    return x1d, profile, slope, x_fit, z_fit, transect_x_utm, transect_y_utm, flip_profile
 
 
 def get_transect_config(config_path: Path, x_grid: np.ndarray, y_grid: np.ndarray) -> Optional['profiles.TransectConfig']:
@@ -627,14 +672,22 @@ def create_gif(
     slopes = []
     fit_lines = []
 
+    # For transect profiles, determine flip direction ONCE from first frame
+    # to ensure consistent orientation across all frames
+    flip_direction = None
+
     for i in range(n_frames):
         if use_transect:
-            x1d, profile, slope, x_fit, z_fit, tx, ty = extract_transect_profile(
-                ds, i, transect_config, x_max_relative=x_max_relative, elevation_var=variable
+            x1d, profile, slope, x_fit, z_fit, tx, ty, did_flip = extract_transect_profile(
+                ds, i, transect_config, x_max_relative=x_max_relative, elevation_var=variable,
+                flip_profile=flip_direction,  # Use cached direction after first frame
             )
             if i == 0:
+                # Cache the flip direction from first frame for all subsequent frames
+                flip_direction = did_flip
                 transect_x_utm = tx
                 transect_y_utm = ty
+                print(f"  Profile orientation: {'flipped' if did_flip else 'not flipped'} (seaward at x=0)")
             profile_data.append((x1d, profile))
         else:
             _, profile, slope, x_fit, z_fit = extract_profile_and_slope(
@@ -937,6 +990,7 @@ def process_single_file(
     output_path: Path,
     slopes_dir: Path,
     args,
+    transect_config: Optional['profiles.TransectConfig'] = None,
 ) -> bool:
     """
     Process a single NC file and create GIF.
@@ -971,12 +1025,20 @@ def process_single_file(
         ds.close()
         return True
 
+    # Auto-compute transect config if not provided
+    if transect_config is None and not args.y_index:
+        x_grid = ds.x.values if 'x' in ds.coords else None
+        y_grid = ds.y.values if 'y' in ds.coords else None
+        if x_grid is not None and y_grid is not None:
+            transect_config = get_transect_config(args.config, x_grid, y_grid)
+
     # Create GIF
     try:
         slopes, times, y_pos = create_gif(
             ds,
             output_path,
             variable=args.variable,
+            transect_config=transect_config,
             cmap=args.cmap,
             fps=args.fps,
             dpi=args.dpi,
