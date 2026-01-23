@@ -110,10 +110,9 @@ def detect_runup_for_burst(
         Cross-shore runup position
     Z_runup : array (n_t,)
         Runup elevation
-    dry_beach : array (n_x,)
-        Dry beach reference elevation
+    dry_beach : array (n_x, n_t)
+        Dry beach reference surface (2D, varies with time)
     """
-    n_x, n_t = Z_xt.shape
     dt = time_sec[1] - time_sec[0] if len(time_sec) > 1 else 0.5
 
     # Compute runup stats (same as plot_runup_multisignal.py)
@@ -124,7 +123,7 @@ def detect_runup_for_burst(
         ig_length=ig_length,
     )
 
-    # Compute dry beach reference for plotting
+    # Compute dry beach reference for plotting (returns n_x, n_t)
     dry_beach = runup.compute_dry_beach_reference(Z_xt, dt, ig_length=ig_length)
 
     return result.timeseries.X_runup, result.timeseries.Z_runup, dry_beach
@@ -156,8 +155,8 @@ def create_burst_gif(
         Time values for this burst
     X_runup, Z_runup : arrays (n_frames,)
         Detected runup positions and elevations
-    dry_beach : array (n_x,)
-        Dry beach reference
+    dry_beach : array (n_x, n_frames)
+        Dry beach reference (2D, varies with time)
     output_path : Path
         Output GIF path
     burst_info : dict
@@ -210,7 +209,7 @@ def create_burst_gif(
 
     # Initialize plot elements
     line_profile, = ax.plot([], [], 'b-', linewidth=1.5, label='Profile')
-    line_dry, = ax.plot(x1d, dry_beach, 'g--', linewidth=1, alpha=0.7, label='Dry beach')
+    line_dry, = ax.plot([], [], 'g--', linewidth=1, alpha=0.7, label='Dry beach')
     point_runup, = ax.plot([], [], 'ro', markersize=12, markeredgecolor='darkred',
                            markeredgewidth=2, label='Runup', zorder=5)
 
@@ -246,6 +245,10 @@ def create_burst_gif(
         profile = Z_burst[:, idx]
         line_profile.set_data(x1d, profile)
 
+        # Update dry beach reference (it's 2D, extract column for this timestep)
+        dry_ref = dry_beach[:, idx]
+        line_dry.set_data(x1d, dry_ref)
+
         # Update runup point
         x_r = X_runup[idx]
         z_r = Z_runup[idx]
@@ -275,7 +278,7 @@ def create_burst_gif(
             )
         info_text.set_text(info_str)
 
-        return [line_profile, point_runup, title, info_text]
+        return [line_profile, line_dry, point_runup, title, info_text]
 
     # Create animation
     interval = 1000 / fps
