@@ -27,7 +27,7 @@ class Config:
     lidar_boundary: ArrayLike  # shape (N, 2)
 
 
-def _translate_path_for_os(path_str: str) -> Path:
+def adapt_path_for_os(path_str: str) -> Path:
     """
     Translate paths based on operating system.
 
@@ -43,6 +43,10 @@ def _translate_path_for_os(path_str: str) -> Path:
     # On Darwin (macOS) or other systems, keep paths as-is
 
     return Path(path_str)
+
+
+# Keep old name for backwards compatibility
+_translate_path_for_os = adapt_path_for_os
 
 
 def load_config(path: Path) -> Config:
