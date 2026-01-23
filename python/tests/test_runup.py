@@ -326,3 +326,328 @@ def test_interp_small_gaps():
     # Should interpolate linearly
     np.testing.assert_allclose(result[1], 2.0, atol=0.1)
     np.testing.assert_allclose(result[2], 3.0, atol=0.1)
+
+
+# =============================================================================
+# Multi-Signal Detection Tests
+# =============================================================================
+
+def create_synthetic_intensity_data(
+    Z_xt: np.ndarray,
+    dry_intensity: float = 80.0,
+    wet_intensity: float = 40.0,
+    noise_std: float = 5.0,
+) -> np.ndarray:
+    """
+    Create synthetic intensity data matching elevation structure.
+
+    Water (higher Z relative to dry beach) has lower intensity.
+    """
+    np.random.seed(43)
+
+    # Create base intensity (higher on dry beach)
+    n_x, n_t = Z_xt.shape
+
+    # Use elevation to determine water/sand regions
+    z_threshold = np.percentile(Z_xt, 50)
+
+    I_xt = np.where(
+        Z_xt > z_threshold,
+        wet_intensity,
+        dry_intensity
+    )
+
+    # Add noise
+    I_xt = I_xt + np.random.normal(0, noise_std, I_xt.shape)
+
+    return I_xt.astype(float)
+
+
+def test_sigmoid_function():
+    """Test sigmoid helper function."""
+    # Test basic behavior
+    x = np.array([-2, -1, 0, 1, 2])
+    result = runup._sigmoid(x, scale=1.0)
+
+    # Should be in [0, 1]
+    assert np.all(result >= 0)
+    assert np.all(result <= 1)
+
+    # Sigmoid(0) = 0.5
+    np.testing.assert_allclose(result[2], 0.5, atol=0.01)
+
+    # Monotonically increasing
+    assert np.all(np.diff(result) > 0)
+
+
+def test_compute_elevation_signal_shape():
+    """Test elevation signal has correct shape."""
+    Z_xt, x1d, time_vec = create_synthetic_wave_data()
+    dt = np.median(np.diff(time_vec))
+    dry_beach = runup.compute_dry_beach_reference(Z_xt, dt)
+
+    p_elev = runup.compute_elevation_signal(Z_xt, dry_beach, threshold=0.1)
+
+    assert p_elev.shape == Z_xt.shape
+
+
+def test_compute_elevation_signal_range():
+    """Test elevation signal is in [0, 1]."""
+    Z_xt, x1d, time_vec = create_synthetic_wave_data()
+    dt = np.median(np.diff(time_vec))
+    dry_beach = runup.compute_dry_beach_reference(Z_xt, dt)
+
+    p_elev = runup.compute_elevation_signal(Z_xt, dry_beach, threshold=0.1)
+
+    valid = ~np.isnan(p_elev)
+    assert np.all(p_elev[valid] >= 0)
+    assert np.all(p_elev[valid] <= 1)
+
+
+def test_compute_intensity_signal_shape():
+    """Test intensity signal has correct shape."""
+    Z_xt, x1d, time_vec = create_synthetic_wave_data()
+    I_xt = create_synthetic_intensity_data(Z_xt)
+    dt = np.median(np.diff(time_vec))
+
+    I_dry = runup.compute_dry_intensity_reference(I_xt, dt)
+    p_int = runup.compute_intensity_signal(I_xt, I_dry)
+
+    assert p_int.shape == Z_xt.shape
+
+
+def test_compute_intensity_signal_water_higher():
+    """Test that water regions (lower intensity) have higher probability."""
+    n_x, n_t = 50, 100
+    I_xt = np.full((n_x, n_t), 80.0)  # Dry sand
+    I_xt[:25, :] = 40.0  # Water (lower intensity)
+
+    I_dry = np.full_like(I_xt, 80.0)
+
+    p_int = runup.compute_intensity_signal(I_xt, I_dry)
+
+    # Water region (low I) should have higher probability
+    assert np.mean(p_int[:25, :]) > np.mean(p_int[25:, :])
+
+
+def test_compute_variance_signal_shape():
+    """Test variance signal has correct shape."""
+    Z_xt, x1d, time_vec = create_synthetic_wave_data()
+    dt = np.median(np.diff(time_vec))
+
+    p_var = runup.compute_variance_signal(Z_xt, dt)
+
+    assert p_var.shape == Z_xt.shape
+
+
+def test_compute_variance_signal_fluctuating_higher():
+    """Test that fluctuating regions have higher variance probability."""
+    n_x, n_t = 50, 200
+    dt = 0.5
+
+    # Create data with high variance in one region
+    Z_xt = np.zeros((n_x, n_t))
+    np.random.seed(44)
+    Z_xt[:25, :] = np.random.normal(0, 0.1, (25, n_t))  # High variance (water)
+    Z_xt[25:, :] = np.random.normal(0, 0.01, (25, n_t))  # Low variance (sand)
+
+    p_var = runup.compute_variance_signal(Z_xt, dt, window_seconds=2.5)
+
+    # High variance region should have higher probability
+    mean_high = np.nanmean(p_var[:25, :])
+    mean_low = np.nanmean(p_var[25:, :])
+    assert mean_high > mean_low
+
+
+def test_dry_intensity_reference_above_observed():
+    """Test dry intensity reference is generally above observed."""
+    Z_xt, x1d, time_vec = create_synthetic_wave_data()
+    I_xt = create_synthetic_intensity_data(Z_xt)
+    dt = np.median(np.diff(time_vec))
+
+    I_dry = runup.compute_dry_intensity_reference(I_xt, dt)
+
+    # Dry reference uses moving max, so should be >= observed
+    valid = ~np.isnan(I_dry)
+    # Most should be at or above (with tolerance for smoothing)
+    diff = I_dry[valid] - I_xt[valid]
+    assert np.mean(diff >= -5) > 0.9
+
+
+def test_estimate_elevation_snr_positive():
+    """Test elevation SNR is positive."""
+    Z_xt, x1d, time_vec = create_synthetic_wave_data()
+    dt = np.median(np.diff(time_vec))
+    dry_beach = runup.compute_dry_beach_reference(Z_xt, dt)
+
+    snr = runup.estimate_elevation_snr(Z_xt, dry_beach, threshold=0.1)
+
+    assert len(snr) == Z_xt.shape[1]
+    assert np.all(snr >= 0.1)  # Minimum SNR floor
+
+
+def test_compute_adaptive_weights_normalized():
+    """Test adaptive weights sum to 1."""
+    n_t = 100
+    snr_elev = np.random.uniform(0.5, 5.0, n_t)
+    snr_int = np.random.uniform(0.2, 3.0, n_t)
+    snr_var = np.random.uniform(0.1, 2.0, n_t)
+
+    w_elev, w_int, w_var = runup.compute_adaptive_weights(
+        snr_elev, snr_int, snr_var
+    )
+
+    # Should sum to 1
+    total = w_elev + w_int + w_var
+    np.testing.assert_allclose(total, 1.0, atol=1e-10)
+
+
+def test_compute_adaptive_weights_min_weight():
+    """Test minimum weight constraint prevents zero weights."""
+    n_t = 100
+    snr_elev = np.full(n_t, 10.0)  # High
+    snr_int = np.full(n_t, 0.01)  # Very low
+    snr_var = np.full(n_t, 0.01)  # Very low
+
+    w_elev, w_int, w_var = runup.compute_adaptive_weights(
+        snr_elev, snr_int, snr_var, min_weight=0.1
+    )
+
+    # Weights should be > 0 (non-zero) due to SNR floor from min_weight
+    # With snr_min = min_weight * 3 = 0.3, low SNR signals get boosted
+    # s_elev=10, s_int=0.3, s_var=0.3, total=10.6
+    # w_int = w_var = 0.3/10.6 ≈ 0.028
+    assert np.all(w_int > 0)  # Non-zero
+    assert np.all(w_var > 0)  # Non-zero
+    assert np.all(w_int > 0.02)  # Above floor
+    assert np.all(w_var > 0.02)
+
+
+def test_fuse_signals_adaptive_shape():
+    """Test signal fusion has correct shape."""
+    n_x, n_t = 50, 100
+    p_elev = np.random.uniform(0, 1, (n_x, n_t))
+    p_int = np.random.uniform(0, 1, (n_x, n_t))
+    p_var = np.random.uniform(0, 1, (n_x, n_t))
+
+    w_elev = np.full(n_t, 0.5)
+    w_int = np.full(n_t, 0.3)
+    w_var = np.full(n_t, 0.2)
+
+    P_water, weights_used = runup.fuse_signals_adaptive(
+        p_elev, p_int, p_var, w_elev, w_int, w_var
+    )
+
+    assert P_water.shape == (n_x, n_t)
+    assert weights_used.shape == (3, n_t)
+
+
+def test_fuse_signals_adaptive_range():
+    """Test fused probability is in [0, 1]."""
+    n_x, n_t = 50, 100
+    p_elev = np.random.uniform(0, 1, (n_x, n_t))
+    p_int = np.random.uniform(0, 1, (n_x, n_t))
+    p_var = np.random.uniform(0, 1, (n_x, n_t))
+
+    w_elev = np.full(n_t, 0.5)
+    w_int = np.full(n_t, 0.3)
+    w_var = np.full(n_t, 0.2)
+
+    P_water, _ = runup.fuse_signals_adaptive(
+        p_elev, p_int, p_var, w_elev, w_int, w_var
+    )
+
+    assert np.all(P_water >= 0)
+    assert np.all(P_water <= 1)
+
+
+def test_detect_runup_multisignal_returns_confidence():
+    """Test multi-signal detection returns confidence."""
+    Z_xt, x1d, time_vec = create_synthetic_wave_data()
+    dt = np.median(np.diff(time_vec))
+    dx = np.median(np.diff(x1d))
+
+    # Create probability field
+    P_water = np.random.uniform(0, 1, Z_xt.shape)
+
+    X_runup, Z_runup, idx_runup, confidence = runup.detect_runup_multisignal(
+        Z_xt, P_water, x1d, search_window=0.5, dx=dx
+    )
+
+    assert len(confidence) == Z_xt.shape[1]
+    # Some confidence values should be valid
+    assert np.sum(~np.isnan(confidence)) > 0
+
+
+def test_compute_runup_stats_with_intensity():
+    """Test full runup stats with intensity data."""
+    Z_xt, x1d, time_vec = create_synthetic_wave_data()
+    I_xt = create_synthetic_intensity_data(Z_xt)
+
+    result = runup.compute_runup_stats(
+        Z_xt, x1d, time_vec,
+        I_xt=I_xt,
+        threshold=0.1,
+        ig_length=50.0,
+    )
+
+    # Should use multi-signal
+    assert result.info["multisignal_enabled"] is True
+
+    # Should have weight info
+    assert "mean_weight_elevation" in result.info
+    assert "mean_weight_intensity" in result.info
+    assert "mean_weight_variance" in result.info
+    assert "mean_confidence" in result.info
+
+    # Weights should be valid
+    assert 0 < result.info["mean_weight_elevation"] < 1
+    assert 0 < result.info["mean_weight_intensity"] < 1
+    assert 0 < result.info["mean_weight_variance"] < 1
+
+
+def test_compute_runup_stats_without_intensity():
+    """Test fallback to elevation-only when no intensity."""
+    Z_xt, x1d, time_vec = create_synthetic_wave_data()
+
+    result = runup.compute_runup_stats(
+        Z_xt, x1d, time_vec,
+        I_xt=None,  # No intensity
+        threshold=0.1,
+        ig_length=50.0,
+    )
+
+    # Should fallback
+    assert result.info["multisignal_enabled"] is False
+
+    # Should still produce valid results
+    assert len(result.timeseries.X_runup) == len(time_vec)
+
+
+def test_runup_timeseries_has_confidence():
+    """Test RunupTimeseries dataclass has confidence field."""
+    Z_xt, x1d, time_vec = create_synthetic_wave_data()
+    I_xt = create_synthetic_intensity_data(Z_xt)
+
+    result = runup.compute_runup_stats(
+        Z_xt, x1d, time_vec,
+        I_xt=I_xt,
+    )
+
+    # Should have confidence array
+    assert hasattr(result.timeseries, 'confidence')
+    assert len(result.timeseries.confidence) == len(time_vec)
+
+    # Should have weights_used
+    assert hasattr(result.timeseries, 'weights_used')
+    assert result.timeseries.weights_used.shape[0] == 3  # 3 signals
+
+
+def test_moving_max_nan_basic():
+    """Test moving maximum with NaN handling."""
+    arr = np.array([5, 3, 4, 2, 6, np.nan, 4, 3])
+    result = runup._moving_max_nan(arr, window=3)
+
+    assert len(result) == len(arr)
+    # Should be NaN-aware
+    assert not np.all(np.isnan(result))

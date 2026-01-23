@@ -1,15 +1,24 @@
 """
 Runup detection and spectral analysis module.
-Implements algorithms from MATLAB get_runupStats_L2.m.
+
+Multi-signal approach combining:
+1. Elevation anomaly (Z above dry beach reference)
+2. Intensity drop (water has lower lidar intensity than dry sand)
+3. Temporal variance (water surface fluctuates, sand is stable)
+
+Uses adaptive SNR-based weighting to fuse signals.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 import numpy as np
 from scipy import signal
-from scipy.ndimage import uniform_filter1d, minimum_filter1d
+from scipy.ndimage import uniform_filter1d, minimum_filter1d, maximum_filter1d
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,11 +43,13 @@ class RunupBulk:
 
 @dataclass
 class RunupTimeseries:
-    """Runup time series."""
+    """Runup time series with detection confidence."""
     time: np.ndarray  # Time in seconds
     X_runup: np.ndarray  # Cross-shore runup position (m)
     Z_runup: np.ndarray  # Runup elevation (m)
     idx_runup: np.ndarray  # Index of runup position
+    confidence: np.ndarray = field(default_factory=lambda: np.array([]))  # Fused probability at detected position
+    weights_used: np.ndarray = field(default_factory=lambda: np.array([]))  # (3, n_t) adaptive weights [elev, int, var]
 
 
 @dataclass
@@ -50,6 +61,460 @@ class RunupResult:
     info: dict  # Processing metadata
 
 
+# =============================================================================
+# Sigmoid and utility functions for signal conversion
+# =============================================================================
+
+def _sigmoid(x: np.ndarray, scale: float = 1.0) -> np.ndarray:
+    """
+    Sigmoid function for converting signals to [0, 1] probability.
+
+    sigmoid(x) = 1 / (1 + exp(-x/scale))
+
+    Parameters
+    ----------
+    x : array
+        Input signal
+    scale : float
+        Scaling factor (controls sharpness of transition)
+
+    Returns
+    -------
+    array
+        Values in [0, 1]
+    """
+    # Clip to prevent overflow
+    x_scaled = np.clip(x / scale, -500, 500)
+    return 1.0 / (1.0 + np.exp(-x_scaled))
+
+
+# =============================================================================
+# Signal computation functions
+# =============================================================================
+
+def compute_elevation_signal(
+    Z_xt: np.ndarray,
+    dry_beach: np.ndarray,
+    threshold: float = 0.1,
+    scale: float = 0.05,
+) -> np.ndarray:
+    """
+    Compute water probability from elevation anomaly.
+
+    P = sigmoid((Z - dry_beach - threshold) / scale)
+    Higher elevation above dry beach = higher water probability.
+
+    Parameters
+    ----------
+    Z_xt : array (n_x, n_t)
+        Elevation matrix
+    dry_beach : array (n_x, n_t)
+        Dry beach reference surface
+    threshold : float
+        Minimum water depth to consider (default 0.1m)
+    scale : float
+        Sigmoid scale parameter (default 0.05m)
+
+    Returns
+    -------
+    array (n_x, n_t)
+        Water probability from elevation signal [0, 1]
+    """
+    water_depth = Z_xt - dry_beach - threshold
+    return _sigmoid(water_depth, scale)
+
+
+def compute_intensity_signal(
+    I_xt: np.ndarray,
+    I_dry_ref: np.ndarray,
+    scale: float = 20.0,
+) -> np.ndarray:
+    """
+    Compute water probability from intensity drop.
+
+    Water typically has lower lidar intensity than dry sand.
+    P = sigmoid((I_dry_ref - I) / scale)
+    Larger intensity drop = higher water probability.
+
+    Parameters
+    ----------
+    I_xt : array (n_x, n_t)
+        Intensity matrix
+    I_dry_ref : array (n_x, n_t)
+        Dry sand intensity reference
+    scale : float
+        Sigmoid scale parameter (default 20.0 intensity units)
+
+    Returns
+    -------
+    array (n_x, n_t)
+        Water probability from intensity signal [0, 1]
+    """
+    intensity_drop = I_dry_ref - I_xt
+    return _sigmoid(intensity_drop, scale)
+
+
+def compute_variance_signal(
+    Z_xt: np.ndarray,
+    dt: float,
+    window_seconds: float = 2.5,
+    var_threshold: float = 0.001,
+    scale: float = 0.002,
+) -> np.ndarray:
+    """
+    Compute water probability from local temporal variance.
+
+    Water surface fluctuates, sand is stable.
+    P = sigmoid((variance - var_threshold) / scale)
+    Higher variance = higher water probability.
+
+    Parameters
+    ----------
+    Z_xt : array (n_x, n_t)
+        Elevation matrix
+    dt : float
+        Time step in seconds
+    window_seconds : float
+        Variance window (default 2.5s = ~5 samples at 2Hz)
+    var_threshold : float
+        Baseline variance threshold (default 0.001 m^2)
+    scale : float
+        Sigmoid scale parameter (default 0.002 m^2)
+
+    Returns
+    -------
+    array (n_x, n_t)
+        Water probability from variance signal [0, 1]
+    """
+    n_x, n_t = Z_xt.shape
+    window_samples = max(3, int(window_seconds / dt))
+    if window_samples % 2 == 0:
+        window_samples += 1
+
+    # Compute local variance along time axis for each position
+    variance = np.full_like(Z_xt, np.nan)
+
+    for i in range(n_x):
+        row = Z_xt[i, :]
+        valid = ~np.isnan(row)
+        if valid.sum() > window_samples:
+            # Rolling variance using uniform filter trick:
+            # var(x) = E[x^2] - E[x]^2
+            row_filled = np.where(valid, row, 0.0)
+            mean_x = uniform_filter1d(row_filled, window_samples, mode='nearest')
+            mean_x2 = uniform_filter1d(row_filled ** 2, window_samples, mode='nearest')
+            local_var = mean_x2 - mean_x ** 2
+            local_var = np.maximum(local_var, 0)  # Numerical stability
+            variance[i, valid] = local_var[valid]
+
+    return _sigmoid(variance - var_threshold, scale)
+
+
+def compute_dry_intensity_reference(
+    I_xt: np.ndarray,
+    dt: float,
+    window_seconds: float = 100.0,
+) -> np.ndarray:
+    """
+    Compute dry sand intensity reference using moving maximum filter.
+
+    Analogous to dry beach reference for elevation, but uses maximum
+    since dry sand has higher intensity than water.
+
+    Parameters
+    ----------
+    I_xt : array (n_x, n_t)
+        Intensity matrix
+    dt : float
+        Time step in seconds
+    window_seconds : float
+        Window length for moving maximum (default 100s)
+
+    Returns
+    -------
+    array (n_x, n_t)
+        Dry sand intensity reference
+    """
+    n_x, n_t = I_xt.shape
+
+    # Window size in samples
+    window = int(window_seconds / dt)
+    if window < 1:
+        window = 1
+    if window % 2 == 0:
+        window += 1
+
+    # Moving maximum along time axis
+    I_ref = np.full_like(I_xt, np.nan)
+    for i in range(n_x):
+        row = I_xt[i, :]
+        if np.all(np.isnan(row)):
+            continue
+        I_ref[i, :] = _moving_max_nan(row, window)
+
+    # Fill small gaps
+    I_ref = _fill_gaps_linear(I_ref, max_gap=6)
+
+    # Smooth
+    smooth_samples = int(50 / dt)
+    if smooth_samples < 1:
+        smooth_samples = 1
+    if smooth_samples % 2 == 0:
+        smooth_samples += 1
+
+    for i in range(n_x):
+        valid = ~np.isnan(I_ref[i, :])
+        if valid.sum() > smooth_samples:
+            I_ref[i, valid] = uniform_filter1d(I_ref[i, valid], smooth_samples, mode='nearest')
+
+    return I_ref
+
+
+# =============================================================================
+# SNR estimation and adaptive weighting
+# =============================================================================
+
+def estimate_elevation_snr(
+    Z_xt: np.ndarray,
+    dry_beach: np.ndarray,
+    threshold: float,
+) -> np.ndarray:
+    """
+    Estimate SNR for elevation signal.
+
+    SNR = contrast / noise, where:
+    - contrast = max(Z - dry_beach) - threshold
+    - noise = std of Z in dry region
+
+    Parameters
+    ----------
+    Z_xt : array (n_x, n_t)
+    dry_beach : array (n_x, n_t)
+    threshold : float
+
+    Returns
+    -------
+    array (n_t,)
+        Per-timestep SNR estimate
+    """
+    n_x, n_t = Z_xt.shape
+    water_depth = Z_xt - dry_beach
+
+    snr = np.zeros(n_t)
+    for t in range(n_t):
+        col = water_depth[:, t]
+        valid = ~np.isnan(col)
+        if valid.sum() < 5:
+            snr[t] = 0.1  # Low SNR for insufficient data
+            continue
+
+        # Contrast: max water depth - threshold
+        contrast = np.nanmax(col) - threshold
+
+        # Noise: std of values below threshold (dry region)
+        dry_mask = col < threshold
+        if dry_mask.sum() > 2:
+            noise = np.nanstd(col[dry_mask])
+        else:
+            noise = np.nanstd(col) * 0.5  # Fallback estimate
+
+        if noise < 1e-6:
+            noise = 1e-6
+
+        snr[t] = max(0.1, abs(contrast) / noise)
+
+    return snr
+
+
+def estimate_intensity_snr(
+    I_xt: np.ndarray,
+    I_dry_ref: np.ndarray,
+    p_elevation: np.ndarray,
+) -> np.ndarray:
+    """
+    Estimate SNR for intensity signal.
+
+    Uses elevation probability to identify likely water vs sand regions.
+
+    Parameters
+    ----------
+    I_xt : array (n_x, n_t)
+    I_dry_ref : array (n_x, n_t)
+    p_elevation : array (n_x, n_t)
+        Elevation probability (used to identify water regions)
+
+    Returns
+    -------
+    array (n_t,)
+        Per-timestep SNR estimate
+    """
+    n_x, n_t = I_xt.shape
+    intensity_drop = I_dry_ref - I_xt
+
+    snr = np.zeros(n_t)
+    for t in range(n_t):
+        col = intensity_drop[:, t]
+        valid = ~np.isnan(col)
+        if valid.sum() < 5:
+            snr[t] = 0.1
+            continue
+
+        # Use elevation probability to identify regions
+        p_col = p_elevation[:, t]
+        water_mask = p_col > 0.5
+        sand_mask = p_col < 0.3
+
+        if water_mask.sum() > 2 and sand_mask.sum() > 2:
+            water_drop = np.nanmean(col[water_mask])
+            sand_drop = np.nanmean(col[sand_mask])
+            contrast = water_drop - sand_drop
+            noise = np.nanstd(col[sand_mask])
+        else:
+            # Fallback: use overall statistics
+            contrast = np.nanmax(col) - np.nanmedian(col)
+            noise = np.nanstd(col) * 0.5
+
+        if noise < 1e-6:
+            noise = 1e-6
+
+        snr[t] = max(0.1, abs(contrast) / noise)
+
+    return snr
+
+
+def estimate_variance_snr(
+    p_variance: np.ndarray,
+    p_elevation: np.ndarray,
+) -> np.ndarray:
+    """
+    Estimate SNR for variance signal.
+
+    Ratio of variance in water region vs sand region.
+
+    Parameters
+    ----------
+    p_variance : array (n_x, n_t)
+    p_elevation : array (n_x, n_t)
+
+    Returns
+    -------
+    array (n_t,)
+        Per-timestep SNR estimate
+    """
+    n_x, n_t = p_variance.shape
+
+    snr = np.zeros(n_t)
+    for t in range(n_t):
+        p_var_col = p_variance[:, t]
+        p_elev_col = p_elevation[:, t]
+
+        valid = ~np.isnan(p_var_col)
+        if valid.sum() < 5:
+            snr[t] = 0.1
+            continue
+
+        water_mask = p_elev_col > 0.5
+        sand_mask = p_elev_col < 0.3
+
+        if water_mask.sum() > 2 and sand_mask.sum() > 2:
+            water_var_prob = np.nanmean(p_var_col[water_mask])
+            sand_var_prob = np.nanmean(p_var_col[sand_mask])
+            # Contrast in probability space
+            contrast = water_var_prob - sand_var_prob
+            noise = np.nanstd(p_var_col[sand_mask])
+        else:
+            contrast = np.nanmax(p_var_col) - np.nanmedian(p_var_col)
+            noise = np.nanstd(p_var_col) * 0.5
+
+        if noise < 1e-6:
+            noise = 1e-6
+
+        snr[t] = max(0.1, abs(contrast) / noise)
+
+    return snr
+
+
+def compute_adaptive_weights(
+    snr_elevation: np.ndarray,
+    snr_intensity: np.ndarray,
+    snr_variance: np.ndarray,
+    min_weight: float = 0.1,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Convert SNR estimates to normalized adaptive weights.
+
+    w_i(t) = max(snr_i(t), snr_min) / sum(max(snr_j(t), snr_min))
+
+    Parameters
+    ----------
+    snr_elevation, snr_intensity, snr_variance : arrays (n_t,)
+    min_weight : float
+        Minimum weight for any signal (default 0.1)
+
+    Returns
+    -------
+    w_elevation, w_intensity, w_variance : arrays (n_t,)
+        Normalized weights summing to 1.0 at each timestep
+    """
+    n_t = len(snr_elevation)
+
+    # Apply minimum SNR floor
+    snr_min = min_weight * 3  # Ensures min weight when normalized
+    s_elev = np.maximum(snr_elevation, snr_min)
+    s_int = np.maximum(snr_intensity, snr_min)
+    s_var = np.maximum(snr_variance, snr_min)
+
+    # Normalize to weights
+    total = s_elev + s_int + s_var
+    w_elev = s_elev / total
+    w_int = s_int / total
+    w_var = s_var / total
+
+    return w_elev, w_int, w_var
+
+
+def fuse_signals_adaptive(
+    p_elevation: np.ndarray,
+    p_intensity: np.ndarray,
+    p_variance: np.ndarray,
+    w_elevation: np.ndarray,
+    w_intensity: np.ndarray,
+    w_variance: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Fuse signals with adaptive per-timestep weights.
+
+    P_water(x, t) = w_elev(t) * p_elev(x,t) + w_int(t) * p_int(x,t) + w_var(t) * p_var(x,t)
+
+    Parameters
+    ----------
+    p_elevation, p_intensity, p_variance : arrays (n_x, n_t)
+        Signal probabilities
+    w_elevation, w_intensity, w_variance : arrays (n_t,)
+        Adaptive weights
+
+    Returns
+    -------
+    P_water : array (n_x, n_t)
+        Fused probability
+    weights_used : array (3, n_t)
+        Weights for diagnostics [elevation, intensity, variance]
+    """
+    n_x, n_t = p_elevation.shape
+
+    # Broadcast weights for vectorized computation
+    # weights are (n_t,), probabilities are (n_x, n_t)
+    P_water = (
+        w_elevation[np.newaxis, :] * p_elevation +
+        w_intensity[np.newaxis, :] * p_intensity +
+        w_variance[np.newaxis, :] * p_variance
+    )
+
+    weights_used = np.stack([w_elevation, w_intensity, w_variance], axis=0)
+
+    return P_water, weights_used
+
+
 def compute_runup_stats(
     Z_xt: np.ndarray,
     x1d: np.ndarray,
@@ -59,15 +524,23 @@ def compute_runup_stats(
     ig_length: float = 100.0,
     search_window: float = 0.5,
     window_length_minutes: float = 5.0,
+    # Multi-signal parameters
+    variance_window_seconds: float = 2.5,
+    intensity_scale: float = 20.0,
+    elevation_scale: float = 0.05,
+    variance_scale: float = 0.002,
+    min_weight: float = 0.1,
 ) -> RunupResult:
     """
     Compute runup statistics from time-resolved elevation matrix.
 
-    Matches MATLAB get_runupStats_L2.m algorithm:
-    1. Create dry beach reference using moving minimum filter
-    2. Detect runup line by threshold crossing
-    3. Track runup position with adaptive search window
-    4. Compute spectral statistics
+    Multi-signal approach combining:
+    1. Elevation anomaly (Z above dry beach reference)
+    2. Intensity drop (water has lower lidar intensity)
+    3. Temporal variance (water surface fluctuates)
+
+    When I_xt is provided, uses adaptive SNR-based weighting to fuse all three
+    signals. When I_xt is None, falls back to elevation-only detection.
 
     Parameters
     ----------
@@ -78,20 +551,30 @@ def compute_runup_stats(
     time_vec : array (n_t,)
         Time vector (seconds)
     I_xt : array (n_x, n_t), optional
-        Intensity matrix (not currently used but kept for compatibility)
+        Intensity matrix. If provided, enables multi-signal detection.
     threshold : float
         Water depth threshold for runup detection (default 0.1m)
     ig_length : float
-        Moving minimum window for dry beach reference (default 100s)
+        Moving minimum/maximum window for reference surfaces (default 100s)
     search_window : float
         Adaptive search window size (default ±0.5m)
     window_length_minutes : float
         Window length for spectral analysis (default 5 min)
+    variance_window_seconds : float
+        Window for temporal variance calculation (default 2.5s)
+    intensity_scale : float
+        Sigmoid scale for intensity signal (default 20.0)
+    elevation_scale : float
+        Sigmoid scale for elevation signal (default 0.05m)
+    variance_scale : float
+        Sigmoid scale for variance signal (default 0.002 m^2)
+    min_weight : float
+        Minimum weight for any signal in adaptive fusion (default 0.1)
 
     Returns
     -------
     RunupResult
-        Complete runup analysis results
+        Complete runup analysis results including confidence and weights
     """
     n_x, n_t = Z_xt.shape
     dt = np.median(np.diff(time_vec))
@@ -100,10 +583,58 @@ def compute_runup_stats(
     # Compute dry beach reference surface using moving minimum
     dry_beach = compute_dry_beach_reference(Z_xt, dt, ig_length)
 
-    # Detect runup line
-    X_runup, Z_runup, idx_runup = detect_runup_line(
-        Z_xt, dry_beach, x1d, threshold, search_window, dx
-    )
+    # Multi-signal detection if intensity available
+    use_multisignal = I_xt is not None and I_xt.shape == Z_xt.shape
+
+    if use_multisignal:
+        logger.info("Using multi-signal runup detection (elevation + intensity + variance)")
+
+        # Compute all three signals
+        p_elevation = compute_elevation_signal(Z_xt, dry_beach, threshold, elevation_scale)
+
+        I_dry_ref = compute_dry_intensity_reference(I_xt, dt, ig_length)
+        p_intensity = compute_intensity_signal(I_xt, I_dry_ref, intensity_scale)
+
+        p_variance = compute_variance_signal(Z_xt, dt, variance_window_seconds,
+                                              var_threshold=0.001, scale=variance_scale)
+
+        # Estimate SNR for each signal
+        snr_elevation = estimate_elevation_snr(Z_xt, dry_beach, threshold)
+        snr_intensity = estimate_intensity_snr(I_xt, I_dry_ref, p_elevation)
+        snr_variance = estimate_variance_snr(p_variance, p_elevation)
+
+        # Compute adaptive weights
+        w_elev, w_int, w_var = compute_adaptive_weights(
+            snr_elevation, snr_intensity, snr_variance, min_weight
+        )
+
+        # Fuse signals
+        P_water, weights_used = fuse_signals_adaptive(
+            p_elevation, p_intensity, p_variance,
+            w_elev, w_int, w_var
+        )
+
+        # Detect runup using fused probability
+        X_runup, Z_runup, idx_runup, confidence = detect_runup_multisignal(
+            Z_xt, P_water, x1d, search_window, dx
+        )
+
+        # Log mean weights for diagnostics
+        logger.debug(f"Mean weights: elev={np.mean(w_elev):.2f}, "
+                     f"int={np.mean(w_int):.2f}, var={np.mean(w_var):.2f}")
+
+    else:
+        if I_xt is None:
+            logger.info("No intensity data provided - using elevation-only detection")
+        else:
+            logger.warning("Intensity shape mismatch - falling back to elevation-only")
+
+        # Fallback to elevation-only detection
+        X_runup, Z_runup, idx_runup = detect_runup_line(
+            Z_xt, dry_beach, x1d, threshold, search_window, dx
+        )
+        confidence = np.full(n_t, np.nan)
+        weights_used = np.full((3, n_t), np.nan)
 
     # Clean up runup time series
     X_runup, Z_runup = smooth_runup_timeseries(X_runup, Z_runup, dt)
@@ -120,6 +651,8 @@ def compute_runup_stats(
         X_runup=X_runup,
         Z_runup=Z_runup,
         idx_runup=idx_runup,
+        confidence=confidence,
+        weights_used=weights_used,
     )
 
     info = {
@@ -129,7 +662,18 @@ def compute_runup_stats(
         "ig_length": ig_length,
         "n_valid": np.sum(~np.isnan(Z_runup)),
         "duration_seconds": time_vec[-1] - time_vec[0],
+        "multisignal_enabled": use_multisignal,
+        "variance_window_seconds": variance_window_seconds,
+        "intensity_scale": intensity_scale,
+        "elevation_scale": elevation_scale,
+        "min_weight": min_weight,
     }
+
+    if use_multisignal:
+        info["mean_weight_elevation"] = float(np.mean(w_elev))
+        info["mean_weight_intensity"] = float(np.mean(w_int))
+        info["mean_weight_variance"] = float(np.mean(w_var))
+        info["mean_confidence"] = float(np.nanmean(confidence))
 
     return RunupResult(
         spectrum=spectrum,
@@ -304,6 +848,116 @@ def detect_runup_line(
                 prev_idx = crossing_idx
 
     return X_runup, Z_runup, idx_runup
+
+
+def detect_runup_multisignal(
+    Z_xt: np.ndarray,
+    P_water: np.ndarray,
+    x1d: np.ndarray,
+    search_window: float,
+    dx: float,
+    prob_threshold: float = 0.5,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Detect runup line using fused water probability.
+
+    For each time step:
+    1. Find seaward-most position where P_water > prob_threshold
+    2. Interpolate exact crossing position
+    3. Return confidence = P_water at detected position
+
+    Parameters
+    ----------
+    Z_xt : array (n_x, n_t)
+        Elevation matrix
+    P_water : array (n_x, n_t)
+        Fused water probability [0, 1]
+    x1d : array (n_x,)
+        Cross-shore positions
+    search_window : float
+        Adaptive search window (meters)
+    dx : float
+        Grid spacing
+    prob_threshold : float
+        Probability threshold for water detection (default 0.5)
+
+    Returns
+    -------
+    X_runup, Z_runup, idx_runup, confidence : arrays (n_t,)
+        Runup position, elevation, index, and confidence
+    """
+    n_x, n_t = Z_xt.shape
+    msize = max(1, int(search_window / dx))
+
+    X_runup = np.full(n_t, np.nan)
+    Z_runup = np.full(n_t, np.nan)
+    idx_runup = np.full(n_t, -1, dtype=int)
+    confidence = np.full(n_t, np.nan)
+
+    prev_idx = n_x // 2  # Start in middle
+
+    for ii in range(n_t):
+        p_col = P_water[:, ii]
+
+        # Apply small smoothing to probability
+        valid = ~np.isnan(p_col)
+        if valid.sum() < 5:
+            continue
+
+        p_smooth = p_col.copy()
+        p_smooth[valid] = uniform_filter1d(p_col[valid], 3, mode='nearest')
+
+        # Define search window
+        if ii > 4:
+            search_lo = max(0, prev_idx - msize)
+            search_hi = min(n_x - 1, prev_idx + msize)
+        else:
+            search_lo = 0
+            search_hi = n_x - 1
+
+        # Find seaward-most (highest index) crossing of probability threshold
+        crossing_idx = -1
+        for i in range(search_hi, search_lo, -1):
+            if i < n_x - 1:
+                # Crossing from below to above threshold (landward to seaward)
+                if p_smooth[i] >= prob_threshold > p_smooth[i + 1]:
+                    crossing_idx = i
+                    break
+                # Or from above to below (seaward to landward)
+                if p_smooth[i] <= prob_threshold < p_smooth[i + 1]:
+                    crossing_idx = i
+                    break
+
+        if crossing_idx < 0:
+            # Expand search if no crossing in window
+            for i in range(n_x - 2, 0, -1):
+                if p_smooth[i] >= prob_threshold > p_smooth[i + 1]:
+                    crossing_idx = i
+                    break
+                if p_smooth[i] <= prob_threshold < p_smooth[i + 1]:
+                    crossing_idx = i
+                    break
+
+        if crossing_idx >= 0:
+            # Interpolate exact crossing position
+            if crossing_idx > 0 and crossing_idx < n_x - 1:
+                p0 = p_smooth[crossing_idx]
+                p1 = p_smooth[crossing_idx + 1]
+                if abs(p1 - p0) > 1e-10:
+                    frac = (prob_threshold - p0) / (p1 - p0)
+                    frac = np.clip(frac, 0, 1)
+                    X_runup[ii] = x1d[crossing_idx] + frac * dx
+                else:
+                    X_runup[ii] = x1d[crossing_idx]
+            else:
+                X_runup[ii] = x1d[crossing_idx]
+
+            Z_runup[ii] = Z_xt[crossing_idx, ii]
+            idx_runup[ii] = crossing_idx
+            confidence[ii] = p_smooth[crossing_idx]
+            prev_idx = crossing_idx
+
+    return X_runup, Z_runup, idx_runup, confidence
 
 
 def smooth_runup_timeseries(
@@ -558,6 +1212,37 @@ def estimate_beach_slope(
 # =============================================================================
 # Helper functions
 # =============================================================================
+
+def _moving_max_nan(arr: np.ndarray, window: int) -> np.ndarray:
+    """
+    Moving maximum with NaN handling.
+
+    Analogous to _moving_min_nan but for maximum.
+    Used for dry intensity reference computation.
+    """
+    n = len(arr)
+
+    if n == 0:
+        return np.array([])
+
+    nan_mask = np.isnan(arr)
+    if nan_mask.all():
+        return np.full(n, np.nan)
+
+    # Replace NaN with small value so it doesn't affect maximum
+    valid_min = np.nanmin(arr)
+    fill_value = valid_min - 1e6 if np.isfinite(valid_min) else -1e38
+    arr_filled = np.where(nan_mask, fill_value, arr)
+
+    # Apply scipy's fast maximum filter
+    result = maximum_filter1d(arr_filled, size=window, mode='nearest')
+
+    # Restore NaN where there were no valid points
+    valid_count = uniform_filter1d((~nan_mask).astype(float), size=window, mode='nearest')
+    result[valid_count < 0.5 / window] = np.nan
+
+    return result
+
 
 def _moving_min_nan(arr: np.ndarray, window: int) -> np.ndarray:
     """
