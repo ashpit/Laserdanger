@@ -177,6 +177,7 @@ python scripts/visualization/visualize_l1.py --config CONFIG
 python scripts/visualization/visualize_l1.py --config CONFIG --input L1_20260112.nc  # single file
 
 # Animated L1 GIFs with slope calculation → plotFolder/level1/
+# Uses auto-computed transect for cross-shore profiles (seaward at x=0)
 # Processes ALL L1 files from processFolder/level1/ by default
 python scripts/visualization/gif_nc_l1.py --config CONFIG
 python scripts/visualization/gif_nc_l1.py --config CONFIG --input L1_20260112.nc  # single file
@@ -303,6 +304,7 @@ plotFolder/                     # Figures and QC reports
 | `accumpts_L2.m` | `phase2.bin_point_cloud_temporal()` |
 | `ResidualKernelFilter.m` | `phase2.residual_kernel_filter_delaunay()` |
 | `Get3_1Dprofiles.m` | `profiles.extract_transects()` |
+| (auto-transect) | `profiles.compute_transect_from_swath()` |
 | `get_runupStats_L2.m` | `runup.compute_runup_stats()` |
 | `L1_pipeline.m` | `phase4.process_l1()` |
 | `L2_pipeline.m` | `phase4.process_l2()` |
@@ -357,19 +359,27 @@ result.dataset.to_netcdf("output.nc")
 
 ### Extract profiles from L1 result
 ```python
-from profiles import extract_transects, TransectConfig
+from profiles import extract_transects, TransectConfig, compute_transect_from_swath
+from phase1 import load_config
 
-config = TransectConfig(
-    origin_x=500000.0,
-    origin_y=3700000.0,
-    azimuth=270.0,  # West
+# Option 1: Auto-compute transect from swath geometry
+cfg = load_config("livox_config.json")
+transect = compute_transect_from_swath(
+    X, Y, transform_matrix=cfg.transform_matrix
+)
+
+# Option 2: Manual transect config
+transect = TransectConfig(
+    x1=476190.0, y1=3636210.0,  # Landward end (near scanner)
+    x2=476120.0, y2=3636215.0,  # Seaward end
+    resolution=0.1,
 )
 
 x1d, profiles = extract_transects(
     result.profiles[0].z_mode,
     result.x_edges,
     result.y_edges,
-    config,
+    transect,
     alongshore_spacings=[-4, -2, 0, 2, 4],
 )
 ```
