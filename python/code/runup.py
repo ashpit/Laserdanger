@@ -861,9 +861,12 @@ def detect_runup_multisignal(
     """
     Detect runup line using fused water probability.
 
+    The runup line is the landward-most position where water probability
+    exceeds the threshold - i.e., where water meets dry beach.
+
     For each time step:
-    1. Find seaward-most position where P_water > prob_threshold
-    2. Interpolate exact crossing position
+    1. Search from seaward to landward (following x gradient)
+    2. Find where P_water drops below threshold (water → dry transition)
     3. Return confidence = P_water at detected position
 
     Parameters
@@ -894,6 +897,14 @@ def detect_runup_multisignal(
     idx_runup = np.full(n_t, -1, dtype=int)
     confidence = np.full(n_t, np.nan)
 
+    # Determine search direction based on coordinate system
+    # Find which end has higher probability (water) on average
+    mean_prob_start = np.nanmean(P_water[:n_x//4, :])
+    mean_prob_end = np.nanmean(P_water[-n_x//4:, :])
+
+    # Search from water (high prob) toward land (low prob)
+    search_seaward_to_landward = mean_prob_start > mean_prob_end
+
     prev_idx = n_x // 2  # Start in middle
 
     for ii in range(n_t):
@@ -915,38 +926,56 @@ def detect_runup_multisignal(
             search_lo = 0
             search_hi = n_x - 1
 
-        # Find seaward-most (highest index) crossing of probability threshold
         crossing_idx = -1
-        for i in range(search_hi, search_lo, -1):
-            if i < n_x - 1:
-                # Crossing from below to above threshold (landward to seaward)
-                if p_smooth[i] >= prob_threshold > p_smooth[i + 1]:
-                    crossing_idx = i
-                    break
-                # Or from above to below (seaward to landward)
-                if p_smooth[i] <= prob_threshold < p_smooth[i + 1]:
-                    crossing_idx = i
-                    break
 
+        if search_seaward_to_landward:
+            # Seaward is at low indices, landward at high indices
+            # Search from low to high, find where P drops below threshold
+            for i in range(search_lo, search_hi):
+                if i < n_x - 1 and not np.isnan(p_smooth[i]) and not np.isnan(p_smooth[i + 1]):
+                    # Transition from water (high P) to dry (low P)
+                    if p_smooth[i] >= prob_threshold > p_smooth[i + 1]:
+                        crossing_idx = i
+                        break
+        else:
+            # Seaward is at high indices, landward at low indices
+            # Search from high to low, find where P drops below threshold
+            for i in range(search_hi, search_lo, -1):
+                if i > 0 and not np.isnan(p_smooth[i]) and not np.isnan(p_smooth[i - 1]):
+                    # Transition from water (high P) to dry (low P)
+                    if p_smooth[i] >= prob_threshold > p_smooth[i - 1]:
+                        crossing_idx = i
+                        break
+
+        # Expand search if no crossing found in window
         if crossing_idx < 0:
-            # Expand search if no crossing in window
-            for i in range(n_x - 2, 0, -1):
-                if p_smooth[i] >= prob_threshold > p_smooth[i + 1]:
-                    crossing_idx = i
-                    break
-                if p_smooth[i] <= prob_threshold < p_smooth[i + 1]:
-                    crossing_idx = i
-                    break
+            if search_seaward_to_landward:
+                for i in range(0, n_x - 1):
+                    if not np.isnan(p_smooth[i]) and not np.isnan(p_smooth[i + 1]):
+                        if p_smooth[i] >= prob_threshold > p_smooth[i + 1]:
+                            crossing_idx = i
+                            break
+            else:
+                for i in range(n_x - 1, 0, -1):
+                    if not np.isnan(p_smooth[i]) and not np.isnan(p_smooth[i - 1]):
+                        if p_smooth[i] >= prob_threshold > p_smooth[i - 1]:
+                            crossing_idx = i
+                            break
 
         if crossing_idx >= 0:
             # Interpolate exact crossing position
-            if crossing_idx > 0 and crossing_idx < n_x - 1:
-                p0 = p_smooth[crossing_idx]
-                p1 = p_smooth[crossing_idx + 1]
+            if search_seaward_to_landward:
+                i0, i1 = crossing_idx, crossing_idx + 1
+            else:
+                i0, i1 = crossing_idx, crossing_idx - 1
+
+            if 0 <= i0 < n_x and 0 <= i1 < n_x:
+                p0 = p_smooth[i0]
+                p1 = p_smooth[i1]
                 if abs(p1 - p0) > 1e-10:
                     frac = (prob_threshold - p0) / (p1 - p0)
                     frac = np.clip(frac, 0, 1)
-                    X_runup[ii] = x1d[crossing_idx] + frac * dx
+                    X_runup[ii] = x1d[i0] + frac * (x1d[i1] - x1d[i0])
                 else:
                     X_runup[ii] = x1d[crossing_idx]
             else:
@@ -965,9 +994,10 @@ def smooth_runup_timeseries(
     Z_runup: np.ndarray,
     dt: float,
     median_window_seconds: float = 1.0,
+    outlier_std_threshold: float = 3.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Clean up runup time series with median filtering and gap interpolation.
+    Clean up runup time series with outlier removal, median filtering, and gap interpolation.
 
     Parameters
     ----------
@@ -977,6 +1007,8 @@ def smooth_runup_timeseries(
         Time step
     median_window_seconds : float
         Median filter window (default 1s)
+    outlier_std_threshold : float
+        Remove points more than this many std from rolling median (default 3.0)
 
     Returns
     -------
@@ -989,23 +1021,52 @@ def smooth_runup_timeseries(
     if kernel_size % 2 == 0:
         kernel_size += 1
 
-    # Apply median filter to valid values
-    valid = ~np.isnan(X_runup)
+    X_clean = X_runup.copy()
+    Z_clean = Z_runup.copy()
+
+    valid = ~np.isnan(X_clean)
+    if valid.sum() < kernel_size:
+        return X_runup, Z_runup
+
+    # Step 1: Remove outliers based on deviation from rolling median
+    # Use a larger window for outlier detection
+    outlier_kernel = min(kernel_size * 5, valid.sum() // 2)
+    if outlier_kernel < 3:
+        outlier_kernel = 3
+    if outlier_kernel % 2 == 0:
+        outlier_kernel += 1
+
+    if valid.sum() > outlier_kernel:
+        # Compute rolling median
+        X_valid = X_clean[valid]
+        rolling_med = signal.medfilt(X_valid, outlier_kernel)
+
+        # Compute deviation from rolling median
+        deviation = np.abs(X_valid - rolling_med)
+        dev_std = np.nanstd(deviation)
+
+        if dev_std > 0:
+            # Mark outliers
+            outlier_mask = deviation > outlier_std_threshold * dev_std
+            if outlier_mask.any():
+                # Set outliers to NaN
+                valid_indices = np.where(valid)[0]
+                for i, is_outlier in enumerate(outlier_mask):
+                    if is_outlier:
+                        X_clean[valid_indices[i]] = np.nan
+                        Z_clean[valid_indices[i]] = np.nan
+
+    # Step 2: Apply median filter to remaining valid values
+    valid = ~np.isnan(X_clean)
     if valid.sum() > kernel_size:
-        X_clean = X_runup.copy()
-        Z_clean = Z_runup.copy()
+        X_clean[valid] = signal.medfilt(X_clean[valid], kernel_size)
+        Z_clean[valid] = signal.medfilt(Z_clean[valid], kernel_size)
 
-        # Median filter
-        X_clean[valid] = signal.medfilt(X_runup[valid], kernel_size)
-        Z_clean[valid] = signal.medfilt(Z_runup[valid], kernel_size)
+    # Step 3: Fill small gaps (up to 5 samples)
+    X_clean = _interp_small_gaps(X_clean, max_gap=5)
+    Z_clean = _interp_small_gaps(Z_clean, max_gap=5)
 
-        # Fill small gaps (up to 5 samples)
-        X_clean = _interp_small_gaps(X_clean, max_gap=5)
-        Z_clean = _interp_small_gaps(Z_clean, max_gap=5)
-
-        return X_clean, Z_clean
-
-    return X_runup, Z_runup
+    return X_clean, Z_clean
 
 
 def compute_runup_spectrum(
