@@ -42,6 +42,10 @@ class TransectConfig:
     # Maximum gap size to interpolate (meters)
     max_gap: float = 4.0
 
+    # Tolerance expansion rate (meters per meter from scanner)
+    # 0.0 = fixed tolerance (default), >0 = adaptive tolerance that grows with distance
+    expansion_rate: float = 0.0
+
 
 @dataclass
 class TransectResult:
@@ -82,6 +86,7 @@ def compute_transect_from_swath(
     transform_matrix: Optional[ArrayLike] = None,
     scanner_position: Optional[Tuple[float, float]] = None,
     padding: float = 5.0,
+    expansion_rate: float = 0.0,
 ) -> TransectConfig:
     """
     Auto-compute transect configuration from the lidar swath geometry.
@@ -99,6 +104,8 @@ def compute_transect_from_swath(
         Explicit scanner position in UTM. Overrides transform_matrix.
     padding : float
         Padding to add beyond data extent (meters)
+    expansion_rate : float
+        Tolerance expansion rate for adaptive tolerance (default 0.0 = fixed)
 
     Returns
     -------
@@ -181,6 +188,7 @@ def compute_transect_from_swath(
         x2=x2, y2=y2,
         alongshore_spacings=(0,),  # Single central transect by default
         extend_line=(0, 0),  # No extension needed, endpoints already cover data
+        expansion_rate=expansion_rate,
     )
 
 
@@ -334,6 +342,8 @@ def transect_config_from_dict(config_dict: Dict[str, Any]) -> TransectConfig:
         kwargs["tolerance"] = float(config_dict["tolerance"])
     if "extend_line" in config_dict:
         kwargs["extend_line"] = tuple(config_dict["extend_line"])
+    if "expansion_rate" in config_dict:
+        kwargs["expansion_rate"] = float(config_dict["expansion_rate"])
 
     return TransectConfig(**kwargs)
 
@@ -435,7 +445,9 @@ def _project_points_to_line(
     points: ArrayLike,
     line_start: Tuple[float, float],
     line_vec: ArrayLike,
-    tolerance: float
+    tolerance: float,
+    scanner_position: Optional[Tuple[float, float]] = None,
+    expansion_rate: float = 0.0,
 ) -> Tuple[ArrayLike, ArrayLike, ArrayLike]:
     """
     Project 2D points onto a line and filter by distance.
@@ -449,7 +461,14 @@ def _project_points_to_line(
     line_vec : array (2,)
         Unit vector along line
     tolerance : float
-        Maximum distance from line to keep points
+        Base maximum distance from line to keep points
+    scanner_position : tuple (x, y), optional
+        Scanner position for adaptive tolerance. If provided with expansion_rate > 0,
+        tolerance expands with distance from scanner.
+    expansion_rate : float
+        Tolerance expansion rate (meters per meter from scanner).
+        0.0 = fixed tolerance (default), >0 = adaptive tolerance.
+        Example: 0.02 means tolerance grows by 2cm per meter from scanner.
 
     Returns
     -------
@@ -475,8 +494,14 @@ def _project_points_to_line(
     # Distance from each point to its projection
     dist_to_line = np.sqrt(np.sum((points - proj_points) ** 2, axis=1))
 
-    # Filter by tolerance
-    mask = dist_to_line <= tolerance
+    # Filter by tolerance (adaptive or fixed)
+    if expansion_rate > 0 and scanner_position is not None:
+        scanner_pos = np.array(scanner_position)
+        dist_from_scanner = np.sqrt(np.sum((points - scanner_pos) ** 2, axis=1))
+        adaptive_tolerance = tolerance + dist_from_scanner * expansion_rate
+        mask = dist_to_line <= adaptive_tolerance
+    else:
+        mask = dist_to_line <= tolerance
 
     return proj_length, dist_to_line, mask
 
@@ -557,6 +582,7 @@ def extract_transects(
     y1: Optional[float] = None,
     x2: Optional[float] = None,
     y2: Optional[float] = None,
+    scanner_position: Optional[Tuple[float, float]] = None,
 ) -> TransectResult:
     """
     Extract 1D cross-shore transects from a point cloud.
@@ -577,6 +603,8 @@ def extract_transects(
         Backshore endpoint of central transect (UTM)
     x2, y2 : float, optional
         Offshore endpoint of central transect (UTM)
+    scanner_position : tuple (x, y), optional
+        Scanner position for adaptive tolerance. Used with config.expansion_rate.
 
     Returns
     -------
@@ -656,7 +684,9 @@ def extract_transects(
 
         # Project points onto this transect
         proj_dist, dist_to_line, mask = _project_points_to_line(
-            points, (xs, ys), line_vec, config.tolerance
+            points, (xs, ys), line_vec, config.tolerance,
+            scanner_position=scanner_position,
+            expansion_rate=config.expansion_rate,
         )
 
         if mask.sum() == 0:

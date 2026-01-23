@@ -40,6 +40,22 @@ except ImportError:
         return iterable
 
 
+def _make_l2_filename(date_str: str, expansion_rate: float = None) -> str:
+    """
+    Generate L2 output filename, optionally with expansion rate suffix.
+
+    Examples:
+        _make_l2_filename("20260120") -> "L2_20260120.nc"
+        _make_l2_filename("20260120", 0.02) -> "L2_20260120_exp02.nc"
+        _make_l2_filename("20260120", 0.035) -> "L2_20260120_exp04.nc"
+    """
+    if expansion_rate is not None and expansion_rate > 0:
+        # Convert to integer percentage (0.02 -> 02, 0.035 -> 04)
+        exp_suffix = f"_exp{int(expansion_rate * 100):02d}"
+        return f"L2_{date_str}{exp_suffix}.nc"
+    return f"L2_{date_str}.nc"
+
+
 def _process_l2_batch_chunked(
     config_path: Path,
     start_date: datetime,
@@ -50,6 +66,7 @@ def _process_l2_batch_chunked(
     cleanup_chunks: bool = True,
     resume: bool = False,
     show_progress: bool = True,
+    expansion_rate: float = None,
     **kwargs,
 ) -> phase4.BatchProgress:
     """
@@ -71,7 +88,7 @@ def _process_l2_batch_chunked(
     completed_days = set()
     if resume:
         for day in days_to_process:
-            output_file = output_dir / f"L2_{day.strftime('%Y%m%d')}.nc"
+            output_file = output_dir / _make_l2_filename(day.strftime('%Y%m%d'), expansion_rate)
             if output_file.exists():
                 completed_days.add(day.strftime("%Y-%m-%d"))
                 logger.info("Skipping completed day: %s", day.strftime("%Y-%m-%d"))
@@ -106,7 +123,7 @@ def _process_l2_batch_chunked(
         else:
             day_chunk_dir = None  # Will use temp dir
 
-        output_file = output_dir / f"L2_{day.strftime('%Y%m%d')}.nc"
+        output_file = output_dir / _make_l2_filename(day.strftime('%Y%m%d'), expansion_rate)
 
         try:
             result = phase4.process_l2_chunked(
@@ -119,6 +136,7 @@ def _process_l2_batch_chunked(
                 resume=resume,
                 cleanup_chunks=cleanup_chunks,
                 show_progress=False,  # Don't show nested progress
+                expansion_rate=expansion_rate,
                 **kwargs,
             )
 
@@ -248,6 +266,12 @@ Examples:
         "--keep-chunks", action="store_true",
         help="Keep intermediate chunk files after processing (for debugging)"
     )
+    parser.add_argument(
+        "--expansion-rate", type=float, default=None,
+        help="Tolerance expansion rate (m/m) for adaptive transect width. "
+             "E.g., 0.02 = tolerance grows by 2cm per meter from scanner. "
+             "Output files will be named L2_YYYYMMDD_expNN.nc"
+    )
 
     args = parser.parse_args()
 
@@ -301,14 +325,19 @@ Examples:
     logger.info("Date range: %s to %s", start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
     logger.info("Output directory: %s", output_dir)
     logger.info("Temporal resolution: %.2f Hz (%.3f s bins)", 1.0/args.time_bin, args.time_bin)
+    if args.expansion_rate is not None:
+        logger.info("Adaptive tolerance: expansion_rate=%.3f (tolerance grows by %.1fcm per meter from scanner)",
+                    args.expansion_rate, args.expansion_rate * 100)
 
     if args.dry_run:
         print(f"\nDry run - would process {n_days} days:")
+        if args.expansion_rate is not None:
+            print(f"  Using adaptive tolerance with expansion_rate={args.expansion_rate}")
         current = start_date
         while current < end_date:
             day_end = current + timedelta(days=1)
             day_files = phase1.discover_laz_files(cfg.data_folder, start=current, end=day_end)
-            output_file = output_dir / f"L2_{current.strftime('%Y%m%d')}.nc"
+            output_file = output_dir / _make_l2_filename(current.strftime('%Y%m%d'), args.expansion_rate)
             status = "exists" if output_file.exists() else "pending"
             print(f"  {current.strftime('%Y-%m-%d')}: {len(day_files)} files -> {output_file.name} [{status}]")
             current = day_end
@@ -331,6 +360,7 @@ Examples:
                 cleanup_chunks=not args.keep_chunks,
                 resume=args.resume,
                 show_progress=not args.no_progress,
+                expansion_rate=args.expansion_rate,
                 time_bin_size=args.time_bin,
                 x_bin_size=args.x_bin,
                 multi_transect=args.multi_transect,
@@ -350,6 +380,7 @@ Examples:
                 x_bin_size=args.x_bin,
                 multi_transect=args.multi_transect,
                 apply_outlier_detection=args.outlier_detection,
+                expansion_rate=args.expansion_rate,
                 skip_corrupt=True,
             )
 

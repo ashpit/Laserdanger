@@ -668,6 +668,7 @@ def process_l2(
     max_files: Optional[int] = None,
     parallel_load: bool = True,
     load_workers: int = 4,
+    expansion_rate: Optional[float] = None,
 ) -> phase3.TimeResolvedDataset:
     """
     Orchestrate L2 processing: produces time-resolved Z(x,t) matrices for wave analysis.
@@ -727,6 +728,10 @@ def process_l2(
         Typically 3-4x faster for I/O-bound LAZ decompression.
     load_workers : int
         Number of parallel workers for file loading (default 4)
+    expansion_rate : float, optional
+        Override transect tolerance expansion rate (meters per meter from scanner).
+        If provided, overrides value in profile_config or config file.
+        Example: 0.02 means tolerance grows by 2cm per meter from scanner.
 
     Returns
     -------
@@ -752,6 +757,11 @@ def process_l2(
                 logger.info("Loaded transect config from config file")
         except Exception as e:
             logger.debug(f"No transect config in file: {e}")
+
+    # Override expansion_rate if provided via parameter
+    if expansion_rate is not None and profile_config is not None:
+        profile_config = replace(profile_config, expansion_rate=expansion_rate)
+        logger.info("Using expansion_rate=%.3f from parameter override", expansion_rate)
 
     if data_folder_override is not None:
         cfg = replace(cfg, data_folder=Path(data_folder_override))
@@ -904,7 +914,13 @@ def process_l2(
         profile_config = profiles.compute_transect_from_swath(
             X, Y,
             transform_matrix=cfg.transform_matrix,
+            expansion_rate=expansion_rate if expansion_rate is not None else 0.0,
         )
+        if expansion_rate is not None and expansion_rate > 0:
+            logger.info("Using expansion_rate=%.3f for auto-computed transect", expansion_rate)
+
+    # Get scanner position for adaptive tolerance
+    scanner_position = profiles.get_scanner_position(cfg.transform_matrix)
 
     # Determine transects to process
     transect_grids: Optional[Dict[float, phase2.TimeResolvedGrid]] = None
@@ -937,7 +953,9 @@ def process_l2(
 
             # Project points onto this transect
             proj_dist, dist_to_line, mask = profiles._project_points_to_line(
-                np.column_stack([X, Y]), line_start, line_vec, profile_config.tolerance
+                np.column_stack([X, Y]), line_start, line_vec, profile_config.tolerance,
+                scanner_position=scanner_position,
+                expansion_rate=profile_config.expansion_rate,
             )
 
             if mask.sum() == 0:

@@ -228,6 +228,39 @@ def test_project_points_diagonal_line():
     np.testing.assert_allclose(dist_to_line[0], 0, atol=1e-10)
 
 
+def test_project_points_adaptive_tolerance():
+    """Test adaptive tolerance that expands with distance from scanner."""
+    # Scanner at origin, line along x-axis
+    scanner_position = (0, 0)
+    line_start = (0, 0)
+    line_vec = np.array([1, 0])
+
+    # Points at different distances from scanner
+    # All 1.5m perpendicular to line
+    points = np.array([
+        [10, 1.5],   # 10m from scanner, 1.5m perpendicular
+        [50, 1.5],   # 50m from scanner, 1.5m perpendicular
+        [100, 1.5],  # 100m from scanner, 1.5m perpendicular
+    ])
+
+    # Fixed tolerance = 1.0m -> all points outside tolerance
+    _, _, mask_fixed = profiles._project_points_to_line(
+        points, line_start, line_vec, tolerance=1.0,
+        scanner_position=None, expansion_rate=0.0
+    )
+    np.testing.assert_array_equal(mask_fixed, [False, False, False])
+
+    # Adaptive tolerance with expansion_rate=0.02
+    # At 10m: tolerance = 1.0 + 10*0.02 = 1.2m -> point outside (1.5m > 1.2m)
+    # At 50m: tolerance = 1.0 + 50*0.02 = 2.0m -> point inside (1.5m < 2.0m)
+    # At 100m: tolerance = 1.0 + 100*0.02 = 3.0m -> point inside (1.5m < 3.0m)
+    _, _, mask_adaptive = profiles._project_points_to_line(
+        points, line_start, line_vec, tolerance=1.0,
+        scanner_position=scanner_position, expansion_rate=0.02
+    )
+    np.testing.assert_array_equal(mask_adaptive, [False, True, True])
+
+
 # =============================================================================
 # extract_transects() Tests
 # =============================================================================
