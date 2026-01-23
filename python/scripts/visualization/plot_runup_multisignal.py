@@ -86,6 +86,20 @@ def process_l2_file(l2_path: Path, output_dir: Path, verbose: bool = False):
 
     I_xt = ds["intensity"].values if "intensity" in ds.data_vars else None
 
+    # Check if transect needs to be flipped (seaward should be at x=0)
+    z_mean_along_x = np.nanmean(Z_xt, axis=1)
+    valid_z = ~np.isnan(z_mean_along_x)
+    if valid_z.sum() > 10:
+        first_valid = np.where(valid_z)[0][0]
+        last_valid = np.where(valid_z)[0][-1]
+        if z_mean_along_x[first_valid] > z_mean_along_x[last_valid]:
+            if verbose:
+                print("  Flipping transect orientation (seaward -> x=0)")
+            x1d = x1d[::-1]
+            Z_xt = Z_xt[::-1, :]
+            if I_xt is not None:
+                I_xt = I_xt[::-1, :]
+
     # Find valid regions
     regions = find_valid_regions(Z_xt, time_sec)
 

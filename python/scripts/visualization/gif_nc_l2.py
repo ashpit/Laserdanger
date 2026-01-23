@@ -171,6 +171,7 @@ def create_burst_gif(
     fps: float = 4.0,
     dpi: int = 150,
     max_frames: int = 500,
+    invert_xaxis: bool = False,
 ) -> bool:
     """
     Create animated GIF for a single burst showing profile + runup.
@@ -201,6 +202,8 @@ def create_burst_gif(
         Resolution
     max_frames : int
         Maximum number of frames (subsample if exceeded)
+    invert_xaxis : bool
+        If True, invert x-axis so seaward (ocean) is on the left
 
     Returns
     -------
@@ -253,7 +256,11 @@ def create_burst_gif(
                                       markeredgewidth=2, label='Runup', zorder=5)
     ax_zoom.axhline(y=0, color='cyan', linestyle='-', linewidth=1, alpha=0.5, label='MWL')
 
-    ax_zoom.set_xlim(x_zoom_min, x_zoom_max)
+    # Set xlim with ocean (seaward) on left
+    if invert_xaxis:
+        ax_zoom.set_xlim(x_zoom_max, x_zoom_min)  # Inverted: high-x on left
+    else:
+        ax_zoom.set_xlim(x_zoom_min, x_zoom_max)  # Normal: low-x on left
     ax_zoom.set_ylim(z_min, z_max)
     ax_zoom.set_xlabel('Cross-shore distance (m)', fontsize=11)
     ax_zoom.set_ylabel('Elevation (m)', fontsize=11)
@@ -279,7 +286,11 @@ def create_burst_gif(
     # Add shaded region showing zoom extent
     ax_full.axvspan(x_zoom_min, x_zoom_max, alpha=0.15, color='yellow', label='Zoom region')
 
-    ax_full.set_xlim(x_full_min, x_full_max)
+    # Set xlim with ocean (seaward) on left
+    if invert_xaxis:
+        ax_full.set_xlim(x_full_max, x_full_min)  # Inverted: high-x on left
+    else:
+        ax_full.set_xlim(x_full_min, x_full_max)  # Normal: low-x on left
     ax_full.set_ylim(z_min, z_max)
     ax_full.set_xlabel('Cross-shore distance (m)', fontsize=11)
     ax_full.set_ylabel('Elevation (m)', fontsize=11)
@@ -408,6 +419,26 @@ def process_l2_file(
     # Get intensity if available
     I_xt = ds["intensity"].values if "intensity" in ds.data_vars else None
 
+    # Determine which end of transect is seaward (lower elevation)
+    # We want seaward (ocean) on the LEFT side of the plot
+    z_mean_along_x = np.nanmean(Z_xt, axis=1)  # Mean over time for each x position
+    valid_z = ~np.isnan(z_mean_along_x)
+    invert_xaxis = False  # If True, flip xlim so seaward is on left
+    if valid_z.sum() > 10:
+        # Find elevation at min-x and max-x ends
+        valid_indices = np.where(valid_z)[0]
+        idx_min_x = valid_indices[np.argmin(x1d[valid_indices])]
+        idx_max_x = valid_indices[np.argmax(x1d[valid_indices])]
+        z_at_min_x = z_mean_along_x[idx_min_x]
+        z_at_max_x = z_mean_along_x[idx_max_x]
+
+        # If seaward (lower elevation) is at max-x, we need to invert x-axis
+        # so that max-x appears on the left side of the plot
+        if z_at_max_x < z_at_min_x:
+            invert_xaxis = True
+            if verbose:
+                print("  Inverting x-axis (seaward at high-x → left side of plot)")
+
     if verbose:
         print(f"  Data shape: Z_xt={Z_xt.shape}")
         print(f"  Time range: {time_sec[0]:.1f}s to {time_sec[-1]:.1f}s ({(time_sec[-1]-time_sec[0])/60:.1f} min)")
@@ -463,6 +494,7 @@ def process_l2_file(
                 X_runup, Z_runup, dry_beach,
                 output_path, burst,
                 fps=fps, dpi=dpi, max_frames=max_frames,
+                invert_xaxis=invert_xaxis,
             )
             if success:
                 n_created += 1
