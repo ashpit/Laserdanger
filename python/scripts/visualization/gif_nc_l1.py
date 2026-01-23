@@ -57,6 +57,9 @@ import xarray as xr
 # Add code directory to path for config loading
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "code"))
 
+import json
+import profiles
+
 
 def print_metadata(ds: xr.Dataset, nc_path: Path) -> dict:
     """
@@ -367,6 +370,152 @@ def extract_profile_and_slope(
     return x, profile, slope, x_fit, z_fit
 
 
+def extract_transect_profile(
+    ds: xr.Dataset,
+    time_idx: int,
+    transect_config: 'profiles.TransectConfig',
+    x_max_relative: float = 20.0,
+    elevation_var: str = 'elevation'
+) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Extract profile along a transect line from 2D gridded data.
+
+    Interpolates the grid data along the transect centerline.
+
+    Returns
+    -------
+    x1d : array
+        Cross-shore distance along transect
+    profile : array
+        Elevation profile
+    slope : float
+        Foreshore slope
+    x_fit : array
+        X positions for fit line (in cross-shore distance)
+    z_fit : array
+        Z values for fit line
+    transect_x_utm : array
+        UTM X coordinates of transect
+    transect_y_utm : array
+        UTM Y coordinates of transect
+    """
+    from scipy.interpolate import RegularGridInterpolator
+
+    # Get grid coordinates
+    x_grid = ds.x.values
+    y_grid = ds.y.values
+
+    # Handle different variable names
+    if elevation_var in ds:
+        da = ds[elevation_var]
+    elif 'elevation' in ds:
+        da = ds['elevation']
+    elif 'elevation_mode' in ds:
+        da = ds['elevation_mode']
+    else:
+        raise ValueError("No elevation variable found in dataset")
+
+    # Get data for this timestep
+    if 'time' in da.dims:
+        data = da.isel(time=time_idx).values
+    else:
+        data = da.values
+
+    # Create interpolator (handles NaN by returning NaN)
+    # Data is (y, x) indexed
+    interpolator = RegularGridInterpolator(
+        (y_grid, x_grid), data,
+        method='linear',
+        bounds_error=False,
+        fill_value=np.nan
+    )
+
+    # Generate points along transect
+    transect_length = np.sqrt(
+        (transect_config.x2 - transect_config.x1)**2 +
+        (transect_config.y2 - transect_config.y1)**2
+    )
+    n_points = int(transect_length / transect_config.resolution) + 1
+    x1d = np.linspace(0, transect_length, n_points)
+
+    # UTM coordinates along transect
+    t = x1d / transect_length
+    transect_x_utm = transect_config.x1 + t * (transect_config.x2 - transect_config.x1)
+    transect_y_utm = transect_config.y1 + t * (transect_config.y2 - transect_config.y1)
+
+    # Interpolate elevations along transect
+    points = np.column_stack([transect_y_utm, transect_x_utm])
+    profile = interpolator(points)
+
+    # Calculate slope
+    slope, x_fit, z_fit = calculate_slope(x1d, profile, x_max_relative=x_max_relative)
+
+    return x1d, profile, slope, x_fit, z_fit, transect_x_utm, transect_y_utm
+
+
+def get_transect_config(config_path: Path, x_grid: np.ndarray, y_grid: np.ndarray) -> Optional['profiles.TransectConfig']:
+    """
+    Load transect config from JSON file or auto-compute from grid extent.
+
+    Parameters
+    ----------
+    config_path : Path
+        Path to config JSON file
+    x_grid, y_grid : array
+        Grid coordinates (for auto-computation if needed)
+
+    Returns
+    -------
+    TransectConfig or None
+    """
+    # Try loading from config file
+    try:
+        with open(config_path, 'r') as f:
+            raw_config = json.load(f)
+
+        if 'transect' in raw_config:
+            return profiles.transect_config_from_dict(raw_config['transect'])
+
+        # Auto-compute from grid and transform matrix
+        if 'transformMatrix' in raw_config:
+            transform = np.array(raw_config['transformMatrix'])
+            scanner_x, scanner_y = profiles.get_scanner_position(transform)
+
+            # Create synthetic points from grid corners for transect computation
+            X_corners = np.array([x_grid.min(), x_grid.max(), x_grid.min(), x_grid.max()])
+            Y_corners = np.array([y_grid.min(), y_grid.min(), y_grid.max(), y_grid.max()])
+
+            # Also add points along the edges
+            X_edge = np.concatenate([
+                np.linspace(x_grid.min(), x_grid.max(), 20),
+                np.linspace(x_grid.min(), x_grid.max(), 20),
+                np.full(20, x_grid.min()),
+                np.full(20, x_grid.max()),
+            ])
+            Y_edge = np.concatenate([
+                np.full(20, y_grid.min()),
+                np.full(20, y_grid.max()),
+                np.linspace(y_grid.min(), y_grid.max(), 20),
+                np.linspace(y_grid.min(), y_grid.max(), 20),
+            ])
+
+            X_all = np.concatenate([X_corners, X_edge])
+            Y_all = np.concatenate([Y_corners, Y_edge])
+
+            config = profiles.compute_transect_from_swath(
+                X_all, Y_all,
+                scanner_position=(scanner_x, scanner_y),
+                padding=2.0,
+            )
+            print(f"Auto-computed transect: ({config.x1:.1f}, {config.y1:.1f}) -> ({config.x2:.1f}, {config.y2:.1f})")
+            return config
+
+    except Exception as e:
+        print(f"Warning: Could not load/compute transect config: {e}")
+
+    return None
+
+
 def create_gif(
     ds: xr.Dataset,
     output_path: Path,
@@ -381,6 +530,7 @@ def create_gif(
     y_index: Optional[int] = None,
     x_max_relative: float = 20.0,
     metadata: dict = None,
+    transect_config: Optional['profiles.TransectConfig'] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """
     Create animated GIF from L1 NetCDF dataset with two-panel display.
@@ -457,21 +607,41 @@ def create_gif(
     x = ds.coords['x'].values if 'x' in ds.coords else np.arange(da.shape[-1])
     y = ds.coords['y'].values if 'y' in ds.coords else np.arange(da.shape[-2])
 
-    # Determine y_index for profile
-    if y_index is None:
-        y_index = len(y) // 2
-    y_pos = float(y[y_index])
+    # Determine profile extraction method
+    use_transect = transect_config is not None
+
+    if use_transect:
+        print(f"  Using transect: ({transect_config.x1:.1f}, {transect_config.y1:.1f}) -> "
+              f"({transect_config.x2:.1f}, {transect_config.y2:.1f})")
+        y_pos = None  # Not used for transect mode
+        transect_x_utm = None
+        transect_y_utm = None
+    else:
+        # Determine y_index for profile (fallback to horizontal slice)
+        if y_index is None:
+            y_index = len(y) // 2
+        y_pos = float(y[y_index])
 
     # Pre-calculate all profiles and slopes
-    profiles = []
+    profile_data = []  # Store (x1d, profile) tuples
     slopes = []
     fit_lines = []
 
     for i in range(n_frames):
-        _, profile, slope, x_fit, z_fit = extract_profile_and_slope(
-            ds, i, y_index, x_max_relative=x_max_relative, elevation_var=variable
-        )
-        profiles.append(profile)
+        if use_transect:
+            x1d, profile, slope, x_fit, z_fit, tx, ty = extract_transect_profile(
+                ds, i, transect_config, x_max_relative=x_max_relative, elevation_var=variable
+            )
+            if i == 0:
+                transect_x_utm = tx
+                transect_y_utm = ty
+            profile_data.append((x1d, profile))
+        else:
+            _, profile, slope, x_fit, z_fit = extract_profile_and_slope(
+                ds, i, y_index, x_max_relative=x_max_relative, elevation_var=variable
+            )
+            profile_data.append((x, profile))
+
         slopes.append(slope)
         fit_lines.append((x_fit, z_fit))
 
@@ -486,7 +656,14 @@ def create_gif(
         print(f"  Std slope:  {np.std(valid_slopes):.4f}")
         print(f"  Min slope:  {np.min(valid_slopes):.4f} ({np.degrees(np.arctan(np.min(valid_slopes))):.2f}°)")
         print(f"  Max slope:  {np.max(valid_slopes):.4f} ({np.degrees(np.arctan(np.max(valid_slopes))):.2f}°)")
-        print(f"  Profile Y position: {y_pos:.1f} m (index {y_index})")
+        if use_transect:
+            transect_length = np.sqrt(
+                (transect_config.x2 - transect_config.x1)**2 +
+                (transect_config.y2 - transect_config.y1)**2
+            )
+            print(f"  Transect length: {transect_length:.1f} m")
+        else:
+            print(f"  Profile Y position: {y_pos:.1f} m (index {y_index})")
         print(f"  Slope fit range: 0-{x_max_relative:.0f} m from seaward edge")
 
     # Create figure
@@ -521,8 +698,16 @@ def create_gif(
         aspect=aspect,
     )
 
-    # Add horizontal line showing profile location
-    profile_line = ax_dem.axhline(y=y_pos, color='red', linestyle='--', linewidth=2, alpha=0.7)
+    # Add line showing profile location
+    if use_transect and transect_x_utm is not None:
+        # Draw transect line
+        profile_line, = ax_dem.plot(
+            transect_x_utm, transect_y_utm,
+            color='red', linestyle='--', linewidth=2, alpha=0.7
+        )
+    else:
+        # Horizontal line at constant Y
+        profile_line = ax_dem.axhline(y=y_pos, color='red', linestyle='--', linewidth=2, alpha=0.7)
 
     if show_colorbar:
         cbar = fig.colorbar(im, ax=ax_dem, label=f'{variable} (m)', shrink=0.8)
@@ -544,22 +729,31 @@ def create_gif(
 
     # === Profile Panel Setup ===
     if show_profile:
+        # Extract all profiles for axis limits
+        all_profiles = [p[1] for p in profile_data]
+
         # Determine profile axis limits
-        all_z = np.concatenate([p[~np.isnan(p)] for p in profiles if np.any(~np.isnan(p))])
+        all_z = np.concatenate([p[~np.isnan(p)] for p in all_profiles if np.any(~np.isnan(p))])
         if len(all_z) > 0:
             z_min_plot = np.nanmin(all_z) - 0.5
             z_max_plot = np.nanmax(all_z) + 0.5
         else:
             z_min_plot, z_max_plot = -2, 5
 
+        # Get x-axis limits from first profile
+        x1d_first = profile_data[0][0]
+
         line_profile, = ax_profile.plot([], [], 'b-', linewidth=2, label='Profile')
         line_fit, = ax_profile.plot([], [], 'r--', linewidth=2.5, label='Slope fit')
 
-        ax_profile.set_xlim(x.min(), x.max())
+        ax_profile.set_xlim(x1d_first.min(), x1d_first.max())
         ax_profile.set_ylim(z_min_plot, z_max_plot)
         ax_profile.set_xlabel('Cross-shore distance (m)', fontsize=11)
         ax_profile.set_ylabel('Elevation (m)', fontsize=11)
-        ax_profile.set_title(f'Cross-shore Profile (Y = {y_pos:.1f} m)', fontsize=12)
+        if use_transect:
+            ax_profile.set_title('Cross-shore Profile (along transect)', fontsize=12)
+        else:
+            ax_profile.set_title(f'Cross-shore Profile (Y = {y_pos:.1f} m)', fontsize=12)
         ax_profile.grid(True, alpha=0.3)
         ax_profile.legend(loc='upper right')
 
@@ -619,12 +813,12 @@ def create_gif(
 
         # Update profile panel
         if show_profile:
-            profile = profiles[frame_idx]
+            x1d, profile = profile_data[frame_idx]
             slope = slopes[frame_idx]
             x_fit, z_fit = fit_lines[frame_idx]
 
             # Update profile line
-            line_profile.set_data(x, profile)
+            line_profile.set_data(x1d, profile)
             artists.append(line_profile)
 
             # Update fit line

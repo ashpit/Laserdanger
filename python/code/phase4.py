@@ -486,6 +486,17 @@ def process_l1(
     except Exception as e:
         raise ConfigurationError(f"Failed to load config from {config_path}: {e}")
 
+    # Check for transect config in JSON file (if not passed as argument)
+    if profile_config is None:
+        try:
+            with open(config_path, 'r') as f:
+                raw_config = json.load(f)
+            if 'transect' in raw_config:
+                profile_config = profiles.transect_config_from_dict(raw_config['transect'])
+                logger.info("Loaded transect config from config file")
+        except Exception as e:
+            logger.debug(f"No transect config in file: {e}")
+
     if data_folder_override is not None:
         cfg = replace(cfg, data_folder=Path(data_folder_override))
 
@@ -617,10 +628,15 @@ def process_l1(
         all_points = np.vstack([b[0] for b in batches])
         X, Y, Z = all_points[:, 0], all_points[:, 1], all_points[:, 2]
 
-        if profile_config is not None:
-            profile_result = profiles.extract_transects(X, Y, Z, config=profile_config)
-        else:
-            logger.warning("Profile extraction requested but no profile_config provided")
+        # Auto-compute transect config if not provided
+        if profile_config is None:
+            logger.info("No transect config provided, auto-computing from swath geometry")
+            profile_config = profiles.compute_transect_from_swath(
+                X, Y,
+                transform_matrix=cfg.transform_matrix,
+            )
+
+        profile_result = profiles.extract_transects(X, Y, Z, config=profile_config)
 
     return L1Result(
         dataset=dataset,
@@ -725,6 +741,17 @@ def process_l2(
         cfg = phase1.load_config(config_path)
     except Exception as e:
         raise ConfigurationError(f"Failed to load config from {config_path}: {e}")
+
+    # Check for transect config in JSON file (if not passed as argument)
+    if profile_config is None:
+        try:
+            with open(config_path, 'r') as f:
+                raw_config = json.load(f)
+            if 'transect' in raw_config:
+                profile_config = profiles.transect_config_from_dict(raw_config['transect'])
+                logger.info("Loaded transect config from config file")
+        except Exception as e:
+            logger.debug(f"No transect config in file: {e}")
 
     if data_folder_override is not None:
         cfg = replace(cfg, data_folder=Path(data_folder_override))
@@ -871,6 +898,14 @@ def process_l2(
 
     X, Y, Z = points[:, 0], points[:, 1], points[:, 2]
 
+    # Auto-compute transect if not provided
+    if profile_config is None:
+        logger.info("No transect config provided, auto-computing from swath geometry")
+        profile_config = profiles.compute_transect_from_swath(
+            X, Y,
+            transform_matrix=cfg.transform_matrix,
+        )
+
     # Determine transects to process
     transect_grids: Optional[Dict[float, phase2.TimeResolvedGrid]] = None
     primary_grid = None
@@ -933,20 +968,6 @@ def process_l2(
                     primary_grid = grid
             else:
                 primary_grid = grid
-    else:
-        # Use X coordinate directly as cross-shore
-        points_for_binning = points
-        intensities_1d = intensities
-        times_1d = times
-
-        # Temporal binning
-        primary_grid = phase2.bin_point_cloud_temporal(
-            points_for_binning,
-            intensities_1d,
-            times_1d,
-            x_bin_size=x_bin_size,
-            time_bin_size=time_bin_size,
-        )
 
     if primary_grid is None:
         raise RuntimeError("No valid transect data produced")

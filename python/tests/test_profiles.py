@@ -420,3 +420,147 @@ def test_inpaint_nans_mismatched_lengths():
 
     with pytest.raises(ValueError, match="same length"):
         profiles.inpaint_nans(x, z)
+
+
+# =============================================================================
+# Auto-Transect Computation Tests
+# =============================================================================
+
+def test_get_scanner_position():
+    """Test extracting scanner position from transform matrix."""
+    transform = np.array([
+        [1, 0, 0, 476191.0],
+        [0, 1, 0, 3636211.0],
+        [0, 0, 1, 19.5],
+        [0, 0, 0, 1],
+    ])
+
+    x, y = profiles.get_scanner_position(transform)
+    assert x == 476191.0
+    assert y == 3636211.0
+
+
+def test_get_scanner_position_invalid_shape():
+    """Test error on invalid transform matrix shape."""
+    transform = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+
+    with pytest.raises(ValueError, match="4x4"):
+        profiles.get_scanner_position(transform)
+
+
+def test_compute_transect_from_swath_with_scanner():
+    """Test auto-computing transect from swath with known scanner position."""
+    np.random.seed(42)
+
+    # Create fan-shaped swath emanating from scanner at (0, 0)
+    # Points spread out at 45-degree angle from scanner
+    n_points = 500
+    distances = np.random.uniform(10, 100, n_points)
+    angles = np.random.uniform(-0.3, 0.3, n_points)  # Small spread around 45 degrees
+    base_angle = np.pi / 4  # 45 degrees
+
+    X = distances * np.cos(base_angle + angles)
+    Y = distances * np.sin(base_angle + angles)
+
+    config = profiles.compute_transect_from_swath(
+        X, Y,
+        scanner_position=(0, 0),
+        padding=5.0,
+    )
+
+    # Transect should start near scanner and extend through data
+    # Direction should be approximately 45 degrees
+    dx = config.x2 - config.x1
+    dy = config.y2 - config.y1
+    angle = np.arctan2(dy, dx)
+
+    assert abs(angle - base_angle) < 0.2, f"Expected angle ~45°, got {np.degrees(angle):.1f}°"
+    assert config.x1 < config.x2  # Should extend outward from scanner
+
+
+def test_compute_transect_from_swath_with_transform():
+    """Test auto-computing transect using transform matrix."""
+    np.random.seed(42)
+
+    scanner_x, scanner_y = 500.0, 1000.0
+    n_points = 300
+    distances = np.random.uniform(20, 80, n_points)
+    angles = np.random.uniform(-0.2, 0.2, n_points)
+
+    # Points extending west from scanner
+    X = scanner_x - distances * np.cos(angles)
+    Y = scanner_y + distances * np.sin(angles)
+
+    transform = np.array([
+        [1, 0, 0, scanner_x],
+        [0, 1, 0, scanner_y],
+        [0, 0, 1, 10.0],
+        [0, 0, 0, 1],
+    ])
+
+    config = profiles.compute_transect_from_swath(
+        X, Y,
+        transform_matrix=transform,
+        padding=2.0,
+    )
+
+    # Should produce a valid transect
+    assert config.x1 != config.x2 or config.y1 != config.y2
+    length = np.sqrt((config.x2 - config.x1)**2 + (config.y2 - config.y1)**2)
+    assert length > 50  # Should cover most of the data
+
+
+def test_compute_transect_from_swath_not_enough_points():
+    """Test error with too few points."""
+    X = np.array([1, 2, 3])
+    Y = np.array([1, 2, 3])
+
+    with pytest.raises(ValueError, match="Not enough"):
+        profiles.compute_transect_from_swath(X, Y, scanner_position=(0, 0))
+
+
+def test_transect_config_from_dict_endpoints():
+    """Test creating TransectConfig from dict with endpoints."""
+    config_dict = {
+        "x1": 100.0,
+        "y1": 200.0,
+        "x2": 150.0,
+        "y2": 250.0,
+        "resolution": 0.5,
+        "tolerance": 2.0,
+    }
+
+    config = profiles.transect_config_from_dict(config_dict)
+
+    assert config.x1 == 100.0
+    assert config.y1 == 200.0
+    assert config.x2 == 150.0
+    assert config.y2 == 250.0
+    assert config.resolution == 0.5
+    assert config.tolerance == 2.0
+
+
+def test_transect_config_from_dict_azimuth():
+    """Test creating TransectConfig from dict with origin and azimuth."""
+    config_dict = {
+        "origin_x": 100.0,
+        "origin_y": 200.0,
+        "azimuth": 90.0,  # Due east
+        "length": 50.0,
+    }
+
+    config = profiles.transect_config_from_dict(config_dict)
+
+    assert config.x1 == 100.0
+    assert config.y1 == 200.0
+    # Azimuth 90 (east) means x2 should be x1 + length
+    assert abs(config.x2 - 150.0) < 0.1
+    assert abs(config.y2 - 200.0) < 0.1
+
+
+def test_transect_config_from_dict_missing_fields():
+    """Test error when config dict is missing required fields."""
+    config_dict = {"x1": 100.0}  # Missing other coordinates
+
+    with pytest.raises(ValueError, match="must have either"):
+        profiles.transect_config_from_dict(config_dict)

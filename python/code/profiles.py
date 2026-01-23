@@ -4,13 +4,15 @@ Matches MATLAB Get3_1Dprofiles.m functionality.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.interpolate import interp1d
 
 ArrayLike = np.ndarray
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,293 @@ class TransectResult:
     x1d: ArrayLike  # Cross-shore distance array (1D)
     Z3D: ArrayLike  # Elevation matrix (n_transects x n_positions)
     transect_coords: List[Tuple[ArrayLike, ArrayLike]]  # (x, y) coords for each transect
+
+
+def get_scanner_position(transform_matrix: ArrayLike) -> Tuple[float, float]:
+    """
+    Extract scanner position from 4x4 homogeneous transform matrix.
+
+    The scanner position is the translation component (last column, rows 0-2).
+
+    Parameters
+    ----------
+    transform_matrix : array (4, 4)
+        Homogeneous transformation matrix from lidar to UTM coordinates
+
+    Returns
+    -------
+    x, y : float
+        Scanner position in UTM coordinates
+    """
+    transform_matrix = np.asarray(transform_matrix)
+    if transform_matrix.shape != (4, 4):
+        raise ValueError(f"Transform matrix must be 4x4, got {transform_matrix.shape}")
+
+    x = transform_matrix[0, 3]
+    y = transform_matrix[1, 3]
+    return x, y
+
+
+def compute_transect_from_swath(
+    X: ArrayLike,
+    Y: ArrayLike,
+    transform_matrix: Optional[ArrayLike] = None,
+    scanner_position: Optional[Tuple[float, float]] = None,
+    padding: float = 5.0,
+) -> TransectConfig:
+    """
+    Auto-compute transect configuration from the lidar swath geometry.
+
+    Places the transect along the centerline of the swath, from the scanner
+    position (or data edge nearest to scanner) through the centroid of the data.
+
+    Parameters
+    ----------
+    X, Y : array
+        Point cloud coordinates (1D arrays)
+    transform_matrix : array (4, 4), optional
+        Homogeneous transformation matrix. Used to extract scanner position.
+    scanner_position : tuple (x, y), optional
+        Explicit scanner position in UTM. Overrides transform_matrix.
+    padding : float
+        Padding to add beyond data extent (meters)
+
+    Returns
+    -------
+    TransectConfig
+        Configuration with auto-computed transect endpoints
+
+    Notes
+    -----
+    The algorithm:
+    1. Get scanner position from transform matrix or explicit coordinates
+    2. Compute centroid of point cloud
+    3. Create vector from scanner toward centroid (swath centerline direction)
+    4. Find extent of data along this direction
+    5. Set transect endpoints to cover full data extent with padding
+    """
+    X = np.asarray(X).ravel()
+    Y = np.asarray(Y).ravel()
+
+    # Remove NaN values
+    valid = ~(np.isnan(X) | np.isnan(Y))
+    X = X[valid]
+    Y = Y[valid]
+
+    if len(X) < 10:
+        raise ValueError("Not enough valid points to compute transect")
+
+    # Get scanner position
+    if scanner_position is not None:
+        scanner_x, scanner_y = scanner_position
+    elif transform_matrix is not None:
+        scanner_x, scanner_y = get_scanner_position(transform_matrix)
+    else:
+        # Fallback: estimate scanner at corner of data with highest density
+        # This is a heuristic - the scanner is usually at one vertex of the swath
+        logger.warning("No scanner position provided, estimating from data geometry")
+        scanner_x, scanner_y = _estimate_scanner_position(X, Y)
+
+    # Compute data centroid
+    centroid_x = np.mean(X)
+    centroid_y = np.mean(Y)
+
+    # Direction from scanner to centroid (swath centerline)
+    dx = centroid_x - scanner_x
+    dy = centroid_y - scanner_y
+    dist_to_centroid = np.sqrt(dx**2 + dy**2)
+
+    if dist_to_centroid < 1.0:
+        # Scanner is at centroid - use PCA to find principal direction
+        logger.warning("Scanner at data centroid, using PCA for direction")
+        direction = _compute_principal_direction(X, Y)
+        dx, dy = direction
+    else:
+        # Normalize direction
+        dx /= dist_to_centroid
+        dy /= dist_to_centroid
+
+    # Project all points onto the transect line
+    # proj = (point - scanner) · direction
+    proj_dist = (X - scanner_x) * dx + (Y - scanner_y) * dy
+
+    # Find extent of data along transect
+    min_dist = np.min(proj_dist)
+    max_dist = np.max(proj_dist)
+
+    # Transect endpoints with padding
+    # x1, y1 = backshore (closest to scanner)
+    # x2, y2 = offshore (farthest from scanner)
+    x1 = scanner_x + (min_dist - padding) * dx
+    y1 = scanner_y + (min_dist - padding) * dy
+    x2 = scanner_x + (max_dist + padding) * dx
+    y2 = scanner_y + (max_dist + padding) * dy
+
+    logger.info(
+        f"Auto-computed transect: ({x1:.1f}, {y1:.1f}) -> ({x2:.1f}, {y2:.1f}), "
+        f"length={np.sqrt((x2-x1)**2 + (y2-y1)**2):.1f}m"
+    )
+
+    return TransectConfig(
+        x1=x1, y1=y1,
+        x2=x2, y2=y2,
+        alongshore_spacings=(0,),  # Single central transect by default
+        extend_line=(0, 0),  # No extension needed, endpoints already cover data
+    )
+
+
+def _estimate_scanner_position(X: ArrayLike, Y: ArrayLike) -> Tuple[float, float]:
+    """
+    Estimate scanner position from data geometry.
+
+    The scanner is typically at the apex of the fan-shaped swath.
+    We find this by looking for the point where data density converges.
+    """
+    # Use convex hull to find vertices
+    try:
+        from scipy.spatial import ConvexHull
+        points = np.column_stack([X, Y])
+        hull = ConvexHull(points)
+        hull_points = points[hull.vertices]
+
+        # Find centroid
+        centroid = np.array([np.mean(X), np.mean(Y)])
+
+        # The scanner is likely the hull vertex with smallest spread angle
+        # (i.e., where the fan originates)
+        best_vertex = None
+        min_spread = np.inf
+
+        for i, vertex in enumerate(hull_points):
+            # Compute vectors to adjacent hull vertices
+            prev_vertex = hull_points[i - 1]
+            next_vertex = hull_points[(i + 1) % len(hull_points)]
+
+            v1 = prev_vertex - vertex
+            v2 = next_vertex - vertex
+
+            # Angle between adjacent edges
+            cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
+            angle = np.arccos(np.clip(cos_angle, -1, 1))
+
+            # We want the vertex with smallest interior angle (sharp corner)
+            if angle < min_spread:
+                min_spread = angle
+                best_vertex = vertex
+
+        if best_vertex is not None:
+            return float(best_vertex[0]), float(best_vertex[1])
+
+    except Exception as e:
+        logger.warning(f"ConvexHull method failed: {e}")
+
+    # Fallback: use corner of bounding box closest to centroid direction
+    centroid = np.array([np.mean(X), np.mean(Y)])
+    corners = [
+        (np.min(X), np.min(Y)),
+        (np.min(X), np.max(Y)),
+        (np.max(X), np.min(Y)),
+        (np.max(X), np.max(Y)),
+    ]
+
+    # Find corner with most points nearby (scanner origin has high density)
+    best_corner = corners[0]
+    max_density = 0
+    for corner in corners:
+        dist = np.sqrt((X - corner[0])**2 + (Y - corner[1])**2)
+        # Count points within 10% of max distance
+        threshold = np.percentile(dist, 10)
+        density = np.sum(dist < threshold)
+        if density > max_density:
+            max_density = density
+            best_corner = corner
+
+    return best_corner
+
+
+def _compute_principal_direction(X: ArrayLike, Y: ArrayLike) -> Tuple[float, float]:
+    """
+    Compute principal direction of point cloud using PCA.
+    """
+    # Center the data
+    X_centered = X - np.mean(X)
+    Y_centered = Y - np.mean(Y)
+
+    # Covariance matrix
+    cov = np.cov(X_centered, Y_centered)
+
+    # Eigendecomposition
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+
+    # Principal direction is eigenvector with largest eigenvalue
+    principal_idx = np.argmax(eigenvalues)
+    direction = eigenvectors[:, principal_idx]
+
+    return float(direction[0]), float(direction[1])
+
+
+def transect_config_from_dict(config_dict: Dict[str, Any]) -> TransectConfig:
+    """
+    Create TransectConfig from a dictionary (e.g., from JSON config).
+
+    Parameters
+    ----------
+    config_dict : dict
+        Dictionary with transect parameters. Supports two formats:
+
+        Format 1 (endpoints):
+            {"x1": float, "y1": float, "x2": float, "y2": float, ...}
+
+        Format 2 (origin + azimuth):
+            {"origin_x": float, "origin_y": float, "azimuth": float, "length": float, ...}
+
+        Optional parameters:
+            "alongshore_spacings": list of floats
+            "resolution": float
+            "tolerance": float
+
+    Returns
+    -------
+    TransectConfig
+    """
+    # Check which format
+    if "x1" in config_dict and "x2" in config_dict:
+        x1 = float(config_dict["x1"])
+        y1 = float(config_dict["y1"])
+        x2 = float(config_dict["x2"])
+        y2 = float(config_dict["y2"])
+    elif "origin_x" in config_dict and "azimuth" in config_dict:
+        origin_x = float(config_dict["origin_x"])
+        origin_y = float(config_dict["origin_y"])
+        azimuth_deg = float(config_dict["azimuth"])  # degrees from north, clockwise
+        length = float(config_dict.get("length", 100.0))
+
+        # Convert azimuth to math angle (from east, counterclockwise)
+        azimuth_rad = np.radians(90 - azimuth_deg)
+
+        x1 = origin_x
+        y1 = origin_y
+        x2 = origin_x + length * np.cos(azimuth_rad)
+        y2 = origin_y + length * np.sin(azimuth_rad)
+    else:
+        raise ValueError(
+            "Transect config must have either (x1, y1, x2, y2) or "
+            "(origin_x, origin_y, azimuth, length)"
+        )
+
+    # Optional parameters
+    kwargs = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+
+    if "alongshore_spacings" in config_dict:
+        kwargs["alongshore_spacings"] = tuple(config_dict["alongshore_spacings"])
+    if "resolution" in config_dict:
+        kwargs["resolution"] = float(config_dict["resolution"])
+    if "tolerance" in config_dict:
+        kwargs["tolerance"] = float(config_dict["tolerance"])
+    if "extend_line" in config_dict:
+        kwargs["extend_line"] = tuple(config_dict["extend_line"])
+
+    return TransectConfig(**kwargs)
 
 
 def gapsize(x: ArrayLike) -> ArrayLike:
