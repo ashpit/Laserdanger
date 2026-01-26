@@ -669,6 +669,7 @@ def process_l2(
     parallel_load: bool = True,
     load_workers: int = 4,
     expansion_rate: Optional[float] = None,
+    tolerance: Optional[float] = None,
 ) -> phase3.TimeResolvedDataset:
     """
     Orchestrate L2 processing: produces time-resolved Z(x,t) matrices for wave analysis.
@@ -732,6 +733,11 @@ def process_l2(
         Override transect tolerance expansion rate (meters per meter from scanner).
         If provided, overrides value in profile_config or config file.
         Example: 0.02 means tolerance grows by 2cm per meter from scanner.
+    tolerance : float, optional
+        Override base transect tolerance (meters). This is the perpendicular distance
+        from the transect line within which points are included. Default is 1.0m.
+        Increasing this value captures more data points but may reduce cross-shore
+        resolution. Example: 2.0 means points up to 2m from the transect are included.
 
     Returns
     -------
@@ -762,6 +768,11 @@ def process_l2(
     if expansion_rate is not None and profile_config is not None:
         profile_config = replace(profile_config, expansion_rate=expansion_rate)
         logger.info("Using expansion_rate=%.3f from parameter override", expansion_rate)
+
+    # Override tolerance if provided via parameter
+    if tolerance is not None and profile_config is not None:
+        profile_config = replace(profile_config, tolerance=tolerance)
+        logger.info("Using tolerance=%.2fm from parameter override", tolerance)
 
     if data_folder_override is not None:
         cfg = replace(cfg, data_folder=Path(data_folder_override))
@@ -918,6 +929,10 @@ def process_l2(
         )
         if expansion_rate is not None and expansion_rate > 0:
             logger.info("Using expansion_rate=%.3f for auto-computed transect", expansion_rate)
+        # Apply tolerance override to auto-computed transect
+        if tolerance is not None:
+            profile_config = replace(profile_config, tolerance=tolerance)
+            logger.info("Using tolerance=%.2fm for auto-computed transect", tolerance)
 
     # Get scanner position for adaptive tolerance
     scanner_position = profiles.get_scanner_position(cfg.transform_matrix)

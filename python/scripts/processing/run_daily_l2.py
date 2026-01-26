@@ -272,6 +272,12 @@ Examples:
              "E.g., 0.02 = tolerance grows by 2cm per meter from scanner. "
              "Output files will be named L2_YYYYMMDD_expNN.nc"
     )
+    parser.add_argument(
+        "--tolerance", type=float, default=None,
+        help="Base transect tolerance in meters (default: 1.0). "
+             "Points within this perpendicular distance from the transect line are included. "
+             "Increase to capture more data points (e.g., 2.0 or 3.0 for sparse data)."
+    )
 
     args = parser.parse_args()
 
@@ -325,12 +331,16 @@ Examples:
     logger.info("Date range: %s to %s", start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
     logger.info("Output directory: %s", output_dir)
     logger.info("Temporal resolution: %.2f Hz (%.3f s bins)", 1.0/args.time_bin, args.time_bin)
+    if args.tolerance is not None:
+        logger.info("Base transect tolerance: %.2f m", args.tolerance)
     if args.expansion_rate is not None:
         logger.info("Adaptive tolerance: expansion_rate=%.3f (tolerance grows by %.1fcm per meter from scanner)",
                     args.expansion_rate, args.expansion_rate * 100)
 
     if args.dry_run:
         print(f"\nDry run - would process {n_days} days:")
+        if args.tolerance is not None:
+            print(f"  Using base tolerance: {args.tolerance}m")
         if args.expansion_rate is not None:
             print(f"  Using adaptive tolerance with expansion_rate={args.expansion_rate}")
         current = start_date
@@ -361,6 +371,7 @@ Examples:
                 resume=args.resume,
                 show_progress=not args.no_progress,
                 expansion_rate=args.expansion_rate,
+                tolerance=args.tolerance,
                 time_bin_size=args.time_bin,
                 x_bin_size=args.x_bin,
                 multi_transect=args.multi_transect,
@@ -381,6 +392,7 @@ Examples:
                 multi_transect=args.multi_transect,
                 apply_outlier_detection=args.outlier_detection,
                 expansion_rate=args.expansion_rate,
+                tolerance=args.tolerance,
                 skip_corrupt=True,
             )
 
