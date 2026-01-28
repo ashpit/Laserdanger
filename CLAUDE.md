@@ -114,6 +114,8 @@ Options:
   --end DATE          Override end date (YYYY-MM-DD)
   --time-bin FLOAT    Temporal bin size in seconds (default: 0.5 = 2Hz)
   --x-bin FLOAT       Spatial bin size along transect in meters (default: 0.1)
+  --tolerance FLOAT   Base transect tolerance in meters (default: 1.0)
+  --expansion-rate FLOAT  Adaptive tolerance expansion (m/m), e.g., 0.02
   --multi-transect    Extract multiple alongshore transects
   --outlier-detection Enable outlier detection (off by default)
   --resume            Resume from checkpoint if available
@@ -124,6 +126,10 @@ Options:
   --chunk-size INT    Process LAZ files in chunks (recommended: 8-10 for large datasets)
   --chunk-dir DIR     Directory for intermediate chunk files (default: temp)
   --keep-chunks       Keep intermediate chunk files after processing
+  --mop FLOAT         Use MOP transect number (supports fractional, e.g., 456.3)
+  --mop-table PATH    Path to MOP CSV file (default: python/mop_data/MopTable.csv)
+  --auto-mop          Auto-select best MOP for the data
+  --mop-method STR    MOP selection method: centroid (default), coverage, nearest_scanner
 ```
 
 ## Output Files
@@ -135,8 +141,10 @@ Options:
 
 ```
 python/
-├── code/           # Main source (phase1-4, profiles, runup, utils, validation)
+├── code/           # Main source (phase1-4, profiles, mop, runup, utils, validation)
 ├── configs/        # Site/date-specific configs ({site}_livox_config_{YYYYMMDD}.json)
+├── mop_data/       # MOP (Monitoring and Prediction) transect data
+│   └── MopTable.csv    # MOP endpoints (MopNum, BackXutm, BackYutm, OffXutm, OffYutm)
 ├── tests/          # pytest suite (186+ tests)
 ├── scripts/        # CLI scripts organized by purpose
 │   ├── processing/     # Data processing (run_daily_l1.py, run_daily_l2.py)
@@ -190,6 +198,34 @@ Or using origin + azimuth:
   }
 }
 ```
+
+### MOP Transects
+
+L2 processing supports using MOP (Monitoring and Prediction) transects instead of auto-computed or manually-specified transects. MOPs are standardized cross-shore transects spaced ~100m alongshore along the California coast.
+
+**CLI usage:**
+```bash
+# Use specific MOP number
+python scripts/processing/run_daily_l2.py --config CONFIG --mop 456
+
+# Use fractional MOP (interpolates between MOP 456 and 457)
+python scripts/processing/run_daily_l2.py --config CONFIG --mop 456.3
+
+# Auto-select best MOP for data
+python scripts/processing/run_daily_l2.py --config CONFIG --auto-mop
+
+# Auto-select with different method
+python scripts/processing/run_daily_l2.py --config CONFIG --auto-mop --mop-method coverage
+```
+
+**Selection methods:**
+- `centroid` (default): MOP closest to data centroid
+- `coverage`: MOP with most points within tolerance
+- `nearest_scanner`: MOP closest to scanner position
+
+**Output filenames** include the MOP number: `L2_20260120_MOP456.nc` or `L2_20260120_MOP456.3.nc` for fractional MOPs.
+
+**MOP data** is stored in `python/mop_data/MopTable.csv` with columns: `MopNum, BackXutm, BackYutm, OffXutm, OffYutm` (UTM Zone 11).
 
 To add a new site, copy an existing config and update the paths and transform matrix.
 

@@ -7,8 +7,15 @@ Two-panel figure:
   - Left: 2D DEM/grid view with colorbar
   - Right: Cross-shore profile with foreshore slope fit
 
-Displays metadata about timestamps and grid statistics both in the animation
-frames and printed to the command line.
+Slope Calculation:
+  By default, slope is calculated between fixed tidal datum elevations:
+    - MSL (Mean Sea Level): 0.744m NAVD88
+    - MHW (Mean High Water): 1.34m NAVD88
+  This produces the foreshore slope between these two elevations, which is
+  more oceanographically meaningful than distance-based fitting.
+
+  Use --no-tidal-slope to revert to distance-based fitting (first X meters
+  from seaward edge).
 
 Usage:
     # Process all L1 files from config (recommended)
@@ -28,20 +35,26 @@ Options:
     --vmin FLOAT        Minimum value for colorbar (default: auto)
     --vmax FLOAT        Maximum value for colorbar (default: auto)
     --y-index INT       Y index for profile extraction (default: middle)
-    --x-max FLOAT       Max cross-shore distance for slope fit in meters (default: 20)
+    --z-msl FLOAT       Mean Sea Level in NAVD88 (default: 0.744m)
+    --z-mhw FLOAT       Mean High Water in NAVD88 (default: 1.34m)
+    --no-tidal-slope    Use distance-based slope fit instead of tidal datums
+    --x-max FLOAT       Max cross-shore distance for slope fit (default: 20m, used with --no-tidal-slope)
     --no-colorbar       Disable colorbar
     --no-profile        Disable profile panel (single panel DEM only)
     --save-slopes       Save slopes to JSON file (in processFolder/slopes/)
 
 Examples:
-    # Process all L1 files in processFolder/level1/
+    # Process all L1 files using MSL→MHW slope (default)
     python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json
+
+    # Use custom tidal datums
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json --z-msl 0.5 --z-mhw 1.2
+
+    # Use distance-based slope calculation instead
+    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json --no-tidal-slope --x-max 25
 
     # Process specific file
     python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json --input L1_20260115.nc
-
-    # Custom visualization settings
-    python scripts/gif_nc_l1.py --config configs/do_livox_config_20260112.json --variable elevation --cmap viridis --fps 1
 """
 import argparse
 import sys
@@ -229,26 +242,37 @@ def calculate_slope(
     z: np.ndarray,
     x_max_relative: float = 20.0,
     z_min_threshold: Optional[float] = None,
+    z_msl: Optional[float] = None,
+    z_mhw: Optional[float] = None,
     use_robust: bool = True
 ) -> Tuple[float, np.ndarray, np.ndarray]:
     """
     Calculate foreshore slope using linear regression.
 
-    Designed for Stockdon runup calculations - fits slope in the swash zone
-    from the seaward edge of the profile up to x_max_relative meters inland.
+    Two modes of operation:
+    1. Elevation-based (preferred): If z_msl and z_mhw are provided, fits slope
+       between these two tidal datum elevations (MSL to MHW).
+    2. Distance-based (fallback): Uses x_max_relative from seaward edge.
 
     Parameters
     ----------
     x : array
         Cross-shore positions (m), can be UTM coordinates
     z : array
-        Elevation values (m)
+        Elevation values (m) in NAVD88
     x_max_relative : float
         Maximum cross-shore distance from the seaward edge to include in fit (m).
-        Default 20m captures the typical swash/foreshore zone.
+        Only used if z_msl/z_mhw are not provided.
     z_min_threshold : float, optional
         Minimum elevation threshold - exclude points below this (rejects water noise).
         If None, uses 10th percentile of elevations as threshold.
+        Only used if z_msl/z_mhw are not provided.
+    z_msl : float, optional
+        Mean Sea Level elevation in NAVD88 (m). Default: None.
+        If provided along with z_mhw, slope is calculated between these elevations.
+    z_mhw : float, optional
+        Mean High Water elevation in NAVD88 (m). Default: None.
+        If provided along with z_msl, slope is calculated between these elevations.
     use_robust : bool
         If True, use Theil-Sen robust regression (median-based, outlier resistant).
         If False, use ordinary least squares.
@@ -272,31 +296,43 @@ def calculate_slope(
     if len(z_valid) < 3:
         return np.nan, np.array([]), np.array([])
 
-    # Convert to relative cross-shore distance from seaward edge
-    x_min = x_valid.min()
-    x_relative = x_valid - x_min
+    # Elevation-based filtering (MSL to MHW)
+    if z_msl is not None and z_mhw is not None:
+        # Filter points between MSL and MHW elevations
+        in_range = (z_valid >= z_msl) & (z_valid <= z_mhw)
+        x_fit_pts = x_valid[in_range]
+        z_fit_pts = z_valid[in_range]
 
-    # Filter by cross-shore distance (swash zone constraint)
-    in_swash = x_relative <= x_max_relative
-
-    # Determine elevation threshold for rejecting water/noise at seaward edge
-    if z_min_threshold is None and np.any(in_swash):
-        # Use 10th percentile as automatic threshold to exclude low outliers
-        z_min_threshold = np.percentile(z_valid[in_swash], 10)
-
-    # Apply both spatial and elevation filters
-    if z_min_threshold is not None:
-        in_range = in_swash & (z_valid >= z_min_threshold)
+        if len(x_fit_pts) < 2:
+            # Not enough points in elevation range
+            return np.nan, np.array([]), np.array([])
     else:
-        in_range = in_swash
+        # Distance-based filtering (original behavior)
+        # Convert to relative cross-shore distance from seaward edge
+        x_min = x_valid.min()
+        x_relative = x_valid - x_min
 
-    x_fit_pts = x_valid[in_range]
-    z_fit_pts = z_valid[in_range]
+        # Filter by cross-shore distance (swash zone constraint)
+        in_swash = x_relative <= x_max_relative
 
-    if len(x_fit_pts) < 3:
-        # Fall back to just swash zone filter
-        x_fit_pts = x_valid[in_swash]
-        z_fit_pts = z_valid[in_swash]
+        # Determine elevation threshold for rejecting water/noise at seaward edge
+        if z_min_threshold is None and np.any(in_swash):
+            # Use 10th percentile as automatic threshold to exclude low outliers
+            z_min_threshold = np.percentile(z_valid[in_swash], 10)
+
+        # Apply both spatial and elevation filters
+        if z_min_threshold is not None:
+            in_range = in_swash & (z_valid >= z_min_threshold)
+        else:
+            in_range = in_swash
+
+        x_fit_pts = x_valid[in_range]
+        z_fit_pts = z_valid[in_range]
+
+        if len(x_fit_pts) < 3:
+            # Fall back to just swash zone filter
+            x_fit_pts = x_valid[in_swash]
+            z_fit_pts = z_valid[in_swash]
 
     if len(x_fit_pts) < 2:
         return np.nan, np.array([]), np.array([])
@@ -330,7 +366,9 @@ def extract_profile_and_slope(
     time_idx: int,
     y_index: int,
     x_max_relative: float = 20.0,
-    elevation_var: str = 'elevation'
+    elevation_var: str = 'elevation',
+    z_msl: Optional[float] = None,
+    z_mhw: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray]:
     """
     Extract cross-shore profile and calculate slope for a single timestep.
@@ -365,7 +403,10 @@ def extract_profile_and_slope(
     else:
         profile = da.isel(y=y_index).values
 
-    slope, x_fit, z_fit = calculate_slope(x, profile, x_max_relative=x_max_relative)
+    slope, x_fit, z_fit = calculate_slope(
+        x, profile, x_max_relative=x_max_relative,
+        z_msl=z_msl, z_mhw=z_mhw
+    )
 
     return x, profile, slope, x_fit, z_fit
 
@@ -377,6 +418,8 @@ def extract_transect_profile(
     x_max_relative: float = 20.0,
     elevation_var: str = 'elevation',
     flip_profile: Optional[bool] = None,
+    z_msl: Optional[float] = None,
+    z_mhw: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
     """
     Extract profile along a transect line from 2D gridded data.
@@ -394,13 +437,17 @@ def extract_transect_profile(
     transect_config : TransectConfig
         Transect configuration
     x_max_relative : float
-        Max cross-shore distance for slope fit (m)
+        Max cross-shore distance for slope fit (m). Only used if z_msl/z_mhw not provided.
     elevation_var : str
         Name of elevation variable
     flip_profile : bool, optional
         If True, flip profile so seaward is at x=0.
         If False, don't flip.
         If None (default), auto-detect from elevation data.
+    z_msl : float, optional
+        Mean Sea Level elevation in NAVD88 (m) for slope calculation.
+    z_mhw : float, optional
+        Mean High Water elevation in NAVD88 (m) for slope calculation.
 
     Returns
     -------
@@ -492,8 +539,13 @@ def extract_transect_profile(
         transect_x_utm = transect_x_utm_raw
         transect_y_utm = transect_y_utm_raw
 
-    # Calculate slope (now x=0 is at seaward end, so first 20m is foreshore)
-    slope, x_fit, z_fit = calculate_slope(x1d, profile, x_max_relative=x_max_relative)
+    # Calculate slope (now x=0 is at seaward end)
+    # If z_msl and z_mhw provided, uses elevation-based fitting
+    # Otherwise uses distance-based fitting (first x_max_relative meters)
+    slope, x_fit, z_fit = calculate_slope(
+        x1d, profile, x_max_relative=x_max_relative,
+        z_msl=z_msl, z_mhw=z_mhw
+    )
 
     return x1d, profile, slope, x_fit, z_fit, transect_x_utm, transect_y_utm, flip_profile
 
@@ -576,6 +628,8 @@ def create_gif(
     x_max_relative: float = 20.0,
     metadata: dict = None,
     transect_config: Optional['profiles.TransectConfig'] = None,
+    z_msl: Optional[float] = None,
+    z_mhw: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """
     Create animated GIF from L1 NetCDF dataset with two-panel display.
@@ -606,9 +660,16 @@ def create_gif(
     y_index : int, optional
         Y index for profile extraction (default: middle)
     x_max_relative : float
-        Max cross-shore distance from seaward edge for slope fit (m)
+        Max cross-shore distance from seaward edge for slope fit (m).
+        Only used if z_msl/z_mhw are not provided.
     metadata : dict
         Metadata from print_metadata()
+    z_msl : float, optional
+        Mean Sea Level elevation in NAVD88 (m). If provided with z_mhw,
+        slope is calculated between these tidal datums.
+    z_mhw : float, optional
+        Mean High Water elevation in NAVD88 (m). If provided with z_msl,
+        slope is calculated between these tidal datums.
 
     Returns
     -------
@@ -681,6 +742,7 @@ def create_gif(
             x1d, profile, slope, x_fit, z_fit, tx, ty, did_flip = extract_transect_profile(
                 ds, i, transect_config, x_max_relative=x_max_relative, elevation_var=variable,
                 flip_profile=flip_direction,  # Use cached direction after first frame
+                z_msl=z_msl, z_mhw=z_mhw,
             )
             if i == 0:
                 # Cache the flip direction from first frame for all subsequent frames
@@ -688,10 +750,15 @@ def create_gif(
                 transect_x_utm = tx
                 transect_y_utm = ty
                 print(f"  Profile orientation: {'flipped' if did_flip else 'not flipped'} (seaward at x=0)")
+                if z_msl is not None and z_mhw is not None:
+                    print(f"  Slope fit: MSL ({z_msl:.3f}m) to MHW ({z_mhw:.3f}m) NAVD88")
+                else:
+                    print(f"  Slope fit: 0-{x_max_relative:.0f}m from seaward edge")
             profile_data.append((x1d, profile))
         else:
             _, profile, slope, x_fit, z_fit = extract_profile_and_slope(
-                ds, i, y_index, x_max_relative=x_max_relative, elevation_var=variable
+                ds, i, y_index, x_max_relative=x_max_relative, elevation_var=variable,
+                z_msl=z_msl, z_mhw=z_mhw,
             )
             profile_data.append((x, profile))
 
@@ -717,7 +784,10 @@ def create_gif(
             print(f"  Transect length: {transect_length:.1f} m")
         else:
             print(f"  Profile Y position: {y_pos:.1f} m (index {y_index})")
-        print(f"  Slope fit range: 0-{x_max_relative:.0f} m from seaward edge")
+        if z_msl is not None and z_mhw is not None:
+            print(f"  Slope reference: MSL ({z_msl:.3f}m) to MHW ({z_mhw:.3f}m) NAVD88")
+        else:
+            print(f"  Slope fit range: 0-{x_max_relative:.0f} m from seaward edge")
 
     # Create figure
     if show_profile:
@@ -802,12 +872,18 @@ def create_gif(
         ax_profile.set_xlim(x1d_first.min(), x1d_first.max())
         ax_profile.set_ylim(z_min_plot, z_max_plot)
         ax_profile.set_xlabel('Cross-shore distance (m)', fontsize=11)
-        ax_profile.set_ylabel('Elevation (m)', fontsize=11)
+        ax_profile.set_ylabel('Elevation (m NAVD88)', fontsize=11)
         if use_transect:
             ax_profile.set_title('Cross-shore Profile (along transect)', fontsize=12)
         else:
             ax_profile.set_title(f'Cross-shore Profile (Y = {y_pos:.1f} m)', fontsize=12)
         ax_profile.grid(True, alpha=0.3)
+
+        # Add horizontal reference lines for tidal datums if using elevation-based slope
+        if z_msl is not None and z_mhw is not None:
+            ax_profile.axhline(y=z_msl, color='green', linestyle=':', linewidth=1.5, alpha=0.7, label=f'MSL ({z_msl:.2f}m)')
+            ax_profile.axhline(y=z_mhw, color='orange', linestyle=':', linewidth=1.5, alpha=0.7, label=f'MHW ({z_mhw:.2f}m)')
+
         ax_profile.legend(loc='upper right')
 
         # Slope info text box
@@ -884,11 +960,19 @@ def create_gif(
             # Update slope text
             if not np.isnan(slope):
                 angle = np.degrees(np.arctan(slope))
-                slope_str = (
-                    f"Slope: {slope:.4f}\n"
-                    f"Angle: {angle:.2f}°\n"
-                    f"tan(β) = {abs(slope):.4f}"
-                )
+                if z_msl is not None and z_mhw is not None:
+                    slope_str = (
+                        f"Slope: {slope:.4f}\n"
+                        f"Angle: {angle:.2f}°\n"
+                        f"MSL→MHW\n"
+                        f"({z_msl:.2f}→{z_mhw:.2f}m)"
+                    )
+                else:
+                    slope_str = (
+                        f"Slope: {slope:.4f}\n"
+                        f"Angle: {angle:.2f}°\n"
+                        f"tan(β) = {abs(slope):.4f}"
+                    )
             else:
                 slope_str = "Slope: N/A"
             slope_text.set_text(slope_str)
@@ -939,6 +1023,8 @@ def save_slopes_to_json(
     x_max_relative: float,
     output_path: Path,
     source_file: str,
+    z_msl: Optional[float] = None,
+    z_mhw: Optional[float] = None,
 ) -> None:
     """Save slope timeseries to JSON file."""
     import json
@@ -950,16 +1036,28 @@ def save_slopes_to_json(
     time_strings = [np.datetime_as_string(t, unit='s') for t in times]
 
     # Build JSON structure
+    metadata = {
+        'title': 'L1 Beach Foreshore Slope Timeseries',
+        'description': 'Foreshore slopes calculated for Stockdon runup',
+        'source_file': source_file,
+        'slope_method': 'Theil-Sen robust regression',
+        'created_by': 'gif_nc_l1.py',
+    }
+
+    # Add slope calculation method details
+    if z_msl is not None and z_mhw is not None:
+        metadata['slope_reference'] = 'tidal_datums'
+        metadata['z_msl_navd88_m'] = float(z_msl)
+        metadata['z_mhw_navd88_m'] = float(z_mhw)
+        metadata['description'] = 'Foreshore slope between MSL and MHW (tidal datums)'
+    else:
+        metadata['slope_reference'] = 'distance_based'
+        metadata['x_max_relative_m'] = float(x_max_relative)
+        if y_pos is not None:
+            metadata['y_position_m'] = float(y_pos)
+
     data = {
-        'metadata': {
-            'title': 'L1 Beach Foreshore Slope Timeseries',
-            'description': 'Foreshore slopes calculated for Stockdon runup',
-            'source_file': source_file,
-            'y_position_m': float(y_pos),
-            'x_max_relative_m': float(x_max_relative),
-            'slope_method': 'Theil-Sen robust regression',
-            'created_by': 'gif_nc_l1.py',
-        },
+        'metadata': metadata,
         'statistics': {
             'mean_slope': float(np.nanmean(slopes)),
             'std_slope': float(np.nanstd(slopes)),
@@ -1049,12 +1147,17 @@ def process_single_file(
             y_index=args.y_index,
             x_max_relative=args.x_max,
             metadata=metadata,
+            z_msl=args.z_msl,
+            z_mhw=args.z_mhw,
         )
 
         # Save slopes if requested
         if args.save_slopes:
             slopes_path = slopes_dir / (nc_path.stem + '_slopes.json')
-            save_slopes_to_json(slopes, times, y_pos, args.x_max, slopes_path, nc_path.name)
+            save_slopes_to_json(
+                slopes, times, y_pos, args.x_max, slopes_path, nc_path.name,
+                z_msl=args.z_msl, z_mhw=args.z_mhw
+            )
 
         ds.close()
         return True
@@ -1174,7 +1277,27 @@ Examples:
         "--x-max",
         type=float,
         default=20.0,
-        help="Max cross-shore distance from seaward edge for slope fit in meters (default: 20)"
+        help="Max cross-shore distance from seaward edge for slope fit in meters (default: 20). "
+             "Only used if --z-msl and --z-mhw are not provided."
+    )
+    parser.add_argument(
+        "--z-msl",
+        type=float,
+        default=0.744,
+        help="Mean Sea Level elevation in NAVD88 (m) for slope calculation (default: 0.744). "
+             "Slope is calculated between MSL and MHW elevations."
+    )
+    parser.add_argument(
+        "--z-mhw",
+        type=float,
+        default=1.34,
+        help="Mean High Water elevation in NAVD88 (m) for slope calculation (default: 1.34). "
+             "Slope is calculated between MSL and MHW elevations."
+    )
+    parser.add_argument(
+        "--no-tidal-slope",
+        action="store_true",
+        help="Disable tidal datum slope calculation (MSL to MHW) and use distance-based fit instead"
     )
     parser.add_argument(
         "--save-slopes",
@@ -1193,6 +1316,11 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # Handle --no-tidal-slope flag: disable elevation-based slope calculation
+    if args.no_tidal_slope:
+        args.z_msl = None
+        args.z_mhw = None
 
     # Load config
     from phase1 import load_config

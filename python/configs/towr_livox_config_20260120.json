@@ -1,7 +1,7 @@
 {
   "dataFolder": "/Volumes/camera/TOWR-lidar/surfside-test_20260120/lvx/",
-  "processFolder": "/Users/ncirrito_1/Documents/GitHub/TOWR/Laserdanger/python/nick_outout/lvx_processed/",
-  "plotFolder": "/Users/ncirrito_1/Documents/GitHub/TOWR/Laserdanger/python/nick_outout/lvx_figures/",
+  "processFolder": "/Users/ncirrito/GitHub/Laserdanger/python/nick_output/lvx_processed",
+  "plotFolder": "/Users/ncirrito/GitHub/Laserdanger/python/nick_output/gifs",
   "LidarBoundary": [
     [
       476100,

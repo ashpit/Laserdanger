@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
 
+import mop
 import phase1
 import phase2
 import phase3
@@ -427,6 +428,10 @@ def process_l1(
     show_progress: bool = False,
     skip_corrupt: bool = True,
     max_files: Optional[int] = None,
+    mop_num: Optional[Union[int, float]] = None,
+    mop_table_path: Optional[Path] = None,
+    auto_mop: bool = False,
+    mop_method: str = "centroid",
 ) -> L1Result:
     """
     Orchestrate L1 processing: discover files -> load -> transform/filter ->
@@ -466,6 +471,17 @@ def process_l1(
         Show progress bar (default False)
     skip_corrupt : bool
         Skip corrupt files instead of raising error (default True)
+    mop_num : int or float, optional
+        MOP transect number to use for profile extraction. Supports fractional
+        MOPs (e.g., 456.3). If provided, overrides profile_config.
+    mop_table_path : Path, optional
+        Path to MOP CSV file. Uses default location if not specified.
+    auto_mop : bool
+        If True and mop_num is not specified, automatically select the best MOP
+        for the data. Default False.
+    mop_method : str
+        Method for auto-MOP selection: "centroid" (default), "coverage", or
+        "nearest_scanner". Only used when auto_mop=True.
 
     Returns
     -------
@@ -496,6 +512,29 @@ def process_l1(
                 logger.info("Loaded transect config from config file")
         except Exception as e:
             logger.debug(f"No transect config in file: {e}")
+
+    # MOP transect handling - takes priority over config file transect
+    selected_mop_num = None  # Track selected MOP for metadata
+    if mop_num is not None:
+        # Load MOP table and get specified MOP
+        mop_table = mop.MopTable.load(mop_table_path)
+        selected_mop_num = mop_num
+        mop_transect = (
+            mop_table.get_fractional_mop(mop_num)
+            if mop_num != int(mop_num)
+            else mop_table.get_mop(int(mop_num))
+        )
+        profile_config = mop_transect.to_transect_config(
+            tolerance=2.0,
+            resolution=bin_size,
+        )
+        logger.info("Using MOP %s transect for L1 profiles (length=%.1fm, azimuth=%.1f°)",
+                    mop_num, mop_transect.length, mop_transect.azimuth)
+        # Enable profile extraction when MOP is specified
+        extract_profiles = True
+    elif auto_mop:
+        # Will be handled after loading data
+        extract_profiles = True
 
     if data_folder_override is not None:
         cfg = replace(cfg, data_folder=Path(data_folder_override))
@@ -589,6 +628,29 @@ def process_l1(
 
     logger.info("Processing %d valid batches", len(batches))
 
+    # Handle auto-MOP selection now that we have data
+    if auto_mop and selected_mop_num is None:
+        # Combine all points for MOP selection
+        all_pts = np.vstack([b[0] for b in batches])
+        X_all, Y_all = all_pts[:, 0], all_pts[:, 1]
+        scanner_position = profiles.get_scanner_position(cfg.transform_matrix)
+
+        mop_table = mop.MopTable.load(mop_table_path)
+        selected_mop_num = mop.select_best_mop(
+            X_all, Y_all, mop_table,
+            scanner_position=scanner_position,
+            method=mop_method,
+        )
+        mop_transect = mop_table.get_mop(selected_mop_num)
+        profile_config = mop_transect.to_transect_config(
+            tolerance=2.0,
+            resolution=bin_size,
+        )
+        logger.info(
+            "Auto-selected MOP %d for L1 profiles using '%s' method (length=%.1fm)",
+            selected_mop_num, mop_method, mop_transect.length
+        )
+
     # Use common bin edges across all batches so datasets align
     x_min = min(np.min(b[0][:, 0]) for b in batches)
     x_max = max(np.max(b[0][:, 0]) for b in batches)
@@ -670,6 +732,10 @@ def process_l2(
     load_workers: int = 4,
     expansion_rate: Optional[float] = None,
     tolerance: Optional[float] = None,
+    mop_num: Optional[Union[int, float]] = None,
+    mop_table_path: Optional[Path] = None,
+    auto_mop: bool = False,
+    mop_method: str = "centroid",
 ) -> phase3.TimeResolvedDataset:
     """
     Orchestrate L2 processing: produces time-resolved Z(x,t) matrices for wave analysis.
@@ -738,6 +804,18 @@ def process_l2(
         from the transect line within which points are included. Default is 1.0m.
         Increasing this value captures more data points but may reduce cross-shore
         resolution. Example: 2.0 means points up to 2m from the transect are included.
+    mop_num : int or float, optional
+        MOP (Monitoring and Prediction) transect number to use. Supports fractional
+        MOPs (e.g., 456.3 interpolates between MOP 456 and 457). If provided,
+        overrides profile_config and auto-computed transects.
+    mop_table_path : Path, optional
+        Path to MOP CSV file. Uses default location if not specified.
+    auto_mop : bool
+        If True and mop_num is not specified, automatically select the best MOP
+        for the data using the method specified by mop_method. Default False.
+    mop_method : str
+        Method for auto-MOP selection: "centroid" (default), "coverage", or
+        "nearest_scanner". Only used when auto_mop=True.
 
     Returns
     -------
@@ -763,6 +841,32 @@ def process_l2(
                 logger.info("Loaded transect config from config file")
         except Exception as e:
             logger.debug(f"No transect config in file: {e}")
+
+    # MOP transect handling - takes priority over config file transect
+    selected_mop_num = None  # Track selected MOP for metadata
+    if mop_num is not None or auto_mop:
+        # Load MOP table
+        mop_table = mop.MopTable.load(mop_table_path)
+
+        if mop_num is not None:
+            # Use explicit MOP number
+            selected_mop_num = mop_num
+            mop_transect = (
+                mop_table.get_fractional_mop(mop_num)
+                if mop_num != int(mop_num)
+                else mop_table.get_mop(int(mop_num))
+            )
+            # Default MOP tolerance/resolution can be overridden below
+            base_tolerance = tolerance if tolerance is not None else 2.0
+            base_expansion = expansion_rate if expansion_rate is not None else 0.0
+            profile_config = mop_transect.to_transect_config(
+                tolerance=base_tolerance,
+                resolution=x_bin_size,
+                expansion_rate=base_expansion,
+            )
+            logger.info("Using MOP %s transect (length=%.1fm, azimuth=%.1f°)",
+                        mop_num, mop_transect.length, mop_transect.azimuth)
+        # Note: auto_mop will be handled after loading data to compute centroid
 
     # Override expansion_rate if provided via parameter
     if expansion_rate is not None and profile_config is not None:
@@ -919,6 +1023,30 @@ def process_l2(
 
     X, Y, Z = points[:, 0], points[:, 1], points[:, 2]
 
+    # Get scanner position for MOP selection and adaptive tolerance
+    scanner_position = profiles.get_scanner_position(cfg.transform_matrix)
+
+    # Handle auto-MOP selection now that we have data
+    if auto_mop and selected_mop_num is None:
+        mop_table = mop.MopTable.load(mop_table_path)
+        selected_mop_num = mop.select_best_mop(
+            X, Y, mop_table,
+            scanner_position=scanner_position,
+            method=mop_method,
+        )
+        mop_transect = mop_table.get_mop(selected_mop_num)
+        base_tolerance = tolerance if tolerance is not None else 2.0
+        base_expansion = expansion_rate if expansion_rate is not None else 0.0
+        profile_config = mop_transect.to_transect_config(
+            tolerance=base_tolerance,
+            resolution=x_bin_size,
+            expansion_rate=base_expansion,
+        )
+        logger.info(
+            "Auto-selected MOP %d using '%s' method (length=%.1fm)",
+            selected_mop_num, mop_method, mop_transect.length
+        )
+
     # Auto-compute transect if not provided
     if profile_config is None:
         logger.info("No transect config provided, auto-computing from swath geometry")
@@ -933,9 +1061,6 @@ def process_l2(
         if tolerance is not None:
             profile_config = replace(profile_config, tolerance=tolerance)
             logger.info("Using tolerance=%.2fm for auto-computed transect", tolerance)
-
-    # Get scanner position for adaptive tolerance
-    scanner_position = profiles.get_scanner_position(cfg.transform_matrix)
 
     # Determine transects to process
     transect_grids: Optional[Dict[float, phase2.TimeResolvedGrid]] = None

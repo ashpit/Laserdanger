@@ -24,8 +24,24 @@ from pathlib import Path
 # Add code directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "code"))
 
+import mop
 import phase1
 import phase4
+
+
+def _make_l1_filename(date_str: str, mop_num: float = None) -> str:
+    """
+    Generate L1 output filename, optionally with MOP suffix.
+
+    Examples:
+        _make_l1_filename("20260120") -> "L1_20260120.nc"
+        _make_l1_filename("20260120", mop_num=510) -> "L1_20260120_MOP510.nc"
+        _make_l1_filename("20260120", mop_num=510.5) -> "L1_20260120_MOP510.5.nc"
+    """
+    base = f"L1_{date_str}"
+    if mop_num is not None:
+        base += mop.format_mop_filename_suffix(mop_num)
+    return base + ".nc"
 
 
 def discover_date_range(data_folder: Path) -> tuple[datetime, datetime]:
@@ -97,6 +113,30 @@ def main():
         help="Disable progress bars"
     )
 
+    # MOP transect options
+    parser.add_argument(
+        "--mop", type=float, default=None,
+        help="Use MOP (Monitoring and Prediction) transect number for profile extraction. "
+             "Supports fractional MOPs (e.g., 456.3 interpolates between MOP 456 and 457). "
+             "Output files will be named L1_YYYYMMDD_MOP###.nc"
+    )
+    parser.add_argument(
+        "--mop-table", type=Path, default=None,
+        help="Path to MOP CSV file (default: python/mop_data/MopTable.csv)"
+    )
+    parser.add_argument(
+        "--auto-mop", action="store_true",
+        help="Automatically select the best MOP for the data using the method "
+             "specified by --mop-method. Prints selected MOP during dry-run."
+    )
+    parser.add_argument(
+        "--mop-method", type=str, default="centroid",
+        choices=["centroid", "coverage", "nearest_scanner"],
+        help="Method for auto-MOP selection: 'centroid' (default) selects MOP closest "
+             "to data centroid, 'coverage' selects MOP with most points within tolerance, "
+             "'nearest_scanner' selects MOP closest to scanner position."
+    )
+
     args = parser.parse_args()
 
     # Configure logging
@@ -150,13 +190,32 @@ def main():
     logger.info("Date range: %s to %s", start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
     logger.info("Output directory: %s", output_dir)
 
+    # Determine MOP number to use (explicit or auto-selected)
+    mop_num = args.mop
+    if args.auto_mop and mop_num is None:
+        logger.info("Auto-MOP selection enabled (method: %s)", args.mop_method)
+    elif mop_num is not None:
+        logger.info("Using MOP transect: %s", mop_num)
+
     if args.dry_run:
         print(f"\nDry run - would process {n_days} days:")
+
+        # Handle MOP selection in dry run
+        if mop_num is not None:
+            mop_table = mop.MopTable.load(args.mop_table)
+            if mop_num != int(mop_num):
+                mop_transect = mop_table.get_fractional_mop(mop_num)
+            else:
+                mop_transect = mop_table.get_mop(int(mop_num))
+            print(f"  Using MOP {mop_num} transect (length={mop_transect.length:.1f}m, azimuth={mop_transect.azimuth:.1f}°)")
+        elif args.auto_mop:
+            print(f"  Auto-MOP selection enabled (method: {args.mop_method})")
+
         current = start_date
         while current < end_date:
             day_end = current + timedelta(days=1)
             day_files = phase1.discover_laz_files(cfg.data_folder, start=current, end=day_end)
-            output_file = output_dir / f"L1_{current.strftime('%Y%m%d')}.nc"
+            output_file = output_dir / _make_l1_filename(current.strftime('%Y%m%d'), mop_num)
             status = "exists" if output_file.exists() else "pending"
             print(f"  {current.strftime('%Y-%m-%d')}: {len(day_files)} files -> {output_file.name} [{status}]")
             current = day_end
@@ -175,6 +234,10 @@ def main():
             show_progress=not args.no_progress,
             bin_size=args.bin_size,
             skip_corrupt=True,
+            mop_num=args.mop,
+            mop_table_path=args.mop_table,
+            auto_mop=args.auto_mop,
+            mop_method=args.mop_method,
         )
 
         print(f"\nProcessing complete:")

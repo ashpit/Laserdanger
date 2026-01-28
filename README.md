@@ -92,11 +92,45 @@ python scripts/processing/run_daily_l2.py --config configs/mysite_livox_config_2
 
 # Higher temporal resolution (4 Hz)
 python scripts/processing/run_daily_l2.py --config configs/mysite_livox_config_20260122.json --time-bin 0.25
+
+# Memory-efficient: process in chunks of 10 files at a time (recommended for large datasets)
+python scripts/processing/run_daily_l2.py --config configs/mysite_livox_config_20260122.json --chunk-size 10
+
+# Increase transect tolerance for sparse data
+python scripts/processing/run_daily_l2.py --config configs/mysite_livox_config_20260122.json --tolerance 2.0
+
+# Adaptive tolerance that grows with distance from scanner (2cm per meter)
+python scripts/processing/run_daily_l2.py --config configs/mysite_livox_config_20260122.json --expansion-rate 0.02
 ```
 
-**Output**: `python/data/level2/L2_YYYYMMDD.nc` (one NetCDF per day)
+**Output**: `python/data/level2/L2_YYYYMMDD.nc` (or `L2_YYYYMMDD_expNN.nc` with expansion-rate)
 
-### 5. Run Quality Control
+### 5. Using MOP Transects (California Coast)
+
+MOP (Monitoring and Prediction) transects are standardized cross-shore lines spaced ~100m apart along the California coast. Using MOP transects ensures your data is directly comparable to other coastal studies.
+
+```bash
+# Auto-select the best MOP for your data (recommended)
+python scripts/processing/run_daily_l2.py --config configs/mysite_livox_config_20260122.json --auto-mop
+
+# Use a specific MOP number
+python scripts/processing/run_daily_l2.py --config configs/mysite_livox_config_20260122.json --mop 510
+
+# Use fractional MOP (interpolates between MOP 510 and 511)
+python scripts/processing/run_daily_l2.py --config configs/mysite_livox_config_20260122.json --mop 510.5
+
+# L1 also supports MOP transects for profile extraction
+python scripts/processing/run_daily_l1.py --config configs/mysite_livox_config_20260122.json --auto-mop
+```
+
+**Auto-MOP selection methods:**
+- `--mop-method centroid` (default): MOP closest to data centroid
+- `--mop-method nearest_scanner`: MOP closest to scanner position
+- `--mop-method coverage`: MOP that captures the most data points
+
+**Output**: Files are named with MOP number: `L2_YYYYMMDD_MOP510.nc`
+
+### 6. Run Quality Control
 
 ```bash
 # Comprehensive L1 QC (generates figures to plotFolder/qc/level1/)
@@ -109,7 +143,7 @@ python scripts/qc/qc_level2.py --config configs/mysite_livox_config_20260122.jso
 python scripts/qc/qc_level1.py --config configs/mysite_livox_config_20260122.json --date 2026-01-15
 ```
 
-### 6. Generate Visualizations
+### 7. Generate Visualizations
 
 All visualization scripts use `--config` (required) and process ALL files by default.
 Use `--input` to process a single file.
@@ -154,6 +188,12 @@ Options:
   --verbose, -v       Enable debug logging
   --quiet, -q         Suppress non-error output
   --no-progress       Disable progress bars
+
+MOP Transect Options:
+  --mop FLOAT         Use specific MOP transect (supports fractional, e.g., 510.5)
+  --mop-table PATH    Path to MOP CSV file (default: python/mop_data/MopTable.csv)
+  --auto-mop          Auto-select best MOP for data
+  --mop-method STR    Selection method: centroid (default), coverage, nearest_scanner
 ```
 
 ### L2 Processing: `scripts/processing/run_daily_l2.py`
@@ -170,11 +210,29 @@ Options:
   --end DATE          End date as YYYY-MM-DD
   --time-bin FLOAT    Temporal bin size in seconds (default: 0.5 = 2Hz)
   --x-bin FLOAT       Spatial bin size along transect in meters (default: 0.1)
+  --tolerance FLOAT   Base transect tolerance in meters (default: 1.0).
+                      Points within this perpendicular distance from the
+                      transect line are included. Increase for sparse data.
+  --expansion-rate FLOAT  Adaptive tolerance expansion rate (m/m). E.g., 0.02
+                      means tolerance grows by 2cm per meter from scanner.
+                      Output files named L2_YYYYMMDD_expNN.nc
   --multi-transect    Extract multiple alongshore transects
   --outlier-detection Enable outlier detection (off by default)
+  --chunk-size INT    Process LAZ files in chunks (recommended: 8-10 for
+                      large datasets) to reduce memory usage
+  --chunk-dir DIR     Directory for intermediate chunk files (default: temp)
+  --keep-chunks       Keep intermediate chunk files after processing
   --resume            Resume from checkpoint if interrupted
   --dry-run           Show what would be processed without running
   --verbose, -v       Enable debug logging
+  --quiet, -q         Suppress non-error output
+  --no-progress       Disable progress bars
+
+MOP Transect Options:
+  --mop FLOAT         Use specific MOP transect (supports fractional, e.g., 510.5)
+  --mop-table PATH    Path to MOP CSV file (default: python/mop_data/MopTable.csv)
+  --auto-mop          Auto-select best MOP for data
+  --mop-method STR    Selection method: centroid (default), coverage, nearest_scanner
 ```
 
 ---
@@ -251,6 +309,7 @@ python/
 │   ├── phase2.py                   #   Point cloud binning, filtering, ground detection
 │   ├── phase3.py                   #   Data models (BinnedGrid, TimeResolvedDataset)
 │   ├── phase4.py                   #   Pipeline orchestration (process_l1, process_l2)
+│   ├── mop.py                      #   MOP transect loading, selection, interpolation
 │   ├── profiles.py                 #   Cross-shore profile extraction
 │   ├── runup.py                    #   Wave runup detection and spectral analysis
 │   ├── utils.py                    #   General utilities
@@ -259,6 +318,9 @@ python/
 ├── configs/                        # Site/date-specific configuration files
 │   ├── do_livox_config_YYYYMMDD.json    # Director's Office site configs
 │   └── towr_livox_config_YYYYMMDD.json  # Tower site configs
+│
+├── mop_data/                       # MOP transect reference data
+│   └── MopTable.csv                #   California coast MOP endpoints (UTM)
 │
 ├── scripts/                        # Command-line interface scripts
 │   ├── processing/                 #   Data processing
@@ -283,6 +345,7 @@ python/
 │   ├── test_phase2.py              #   Binning and filtering tests
 │   ├── test_phase3.py              #   Data model tests
 │   ├── test_phase4.py              #   Pipeline integration tests
+│   ├── test_mop.py                 #   MOP transect tests
 │   ├── test_profiles.py            #   Profile extraction tests
 │   ├── test_runup.py               #   Runup detection tests
 │   └── ...                         #   Additional test modules

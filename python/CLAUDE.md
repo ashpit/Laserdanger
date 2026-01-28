@@ -106,6 +106,16 @@ python/
 - `compute_transect_from_swath(X, Y, transform_matrix)` - Auto-compute transect from swath geometry
 - `transect_config_from_dict(config_dict)` - Create TransectConfig from JSON dict
 
+### mop.py - MOP Transect Integration
+- `MopTable.load(path)` - Load MOP table from CSV
+- `MopTable.get_mop(num)` - Get integer MOP transect
+- `MopTable.get_fractional_mop(num)` - Get interpolated fractional MOP (e.g., 456.3)
+- `MopTable.find_mops_in_bounds(...)` - Find MOPs within UTM bounds
+- `select_best_mop(X, Y, table, ...)` - Auto-select optimal MOP for data
+- `MopTransect.to_transect_config()` - Convert MOP to TransectConfig for processing
+- `get_mop_transect(num, ...)` - Convenience function to get TransectConfig from MOP number
+- `format_mop_filename_suffix(num)` - Generate filename suffix (e.g., "_MOP456")
+
 ### runup.py - Runup Detection
 - `compute_runup_stats(Z_xt, I_xt, x1d, time_vec, ...)` - Full runup analysis
 - `compute_dry_beach_reference(Z_xt, dt, window_s)` - Moving minimum filter
@@ -140,9 +150,18 @@ python scripts/processing/run_daily_l2.py --config CONFIG [OPTIONS]
   --output-dir DIR      Output directory
   --time-bin FLOAT      Time bin size in seconds (default: 0.5)
   --x-bin FLOAT         Spatial bin size (default: 0.1)
+  --tolerance FLOAT     Base transect tolerance in meters (default: 1.0)
+  --expansion-rate FLOAT  Adaptive tolerance expansion (m/m), e.g., 0.02
   --multi-transect      Extract multiple alongshore transects
   --outlier-detection   Enable outlier detection
+  --chunk-size INT      Process LAZ files in chunks (recommended: 8-10)
+  --chunk-dir DIR       Directory for intermediate chunk files
+  --keep-chunks         Keep intermediate chunks after processing
   --resume              Resume from checkpoint
+  --mop FLOAT           Use MOP transect (supports fractional, e.g., 456.3)
+  --mop-table PATH      Path to MOP CSV (default: mop_data/MopTable.csv)
+  --auto-mop            Auto-select best MOP for data
+  --mop-method STR      MOP selection: centroid (default), coverage, nearest_scanner
 ```
 
 ### QC Scripts
