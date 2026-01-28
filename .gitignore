@@ -59,3 +59,8 @@ htmlcov/
 
 # Local config (keep template)
 livox_config.json
+python/nick_output/
+__pycache__/
+*.nc
+*.png
+*.gif
