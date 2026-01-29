@@ -254,7 +254,40 @@ Examples:
     )
     parser.add_argument(
         "--outlier-detection", action="store_true",
-        help="Enable outlier detection (disabled by default to preserve wave signals)"
+        help="Enable 2D gradient-based outlier detection (disabled by default)"
+    )
+
+    # Physical outlier filtering options (enabled by default)
+    parser.add_argument(
+        "--no-physical-filter", action="store_true",
+        help="Disable physical bounds filtering (enabled by default)"
+    )
+    parser.add_argument(
+        "--z-max", type=float, default=5.0,
+        help="Maximum valid elevation in meters (default: 5.0). Points above this "
+             "are removed as outliers (birds, people, spray)."
+    )
+    parser.add_argument(
+        "--z-min", type=float, default=-0.5,
+        help="Minimum valid elevation in meters (default: -0.5). Points below this "
+             "are removed as errors."
+    )
+    parser.add_argument(
+        "--no-median-filter", action="store_true",
+        help="Disable median filter for spike smoothing (enabled by default)"
+    )
+    parser.add_argument(
+        "--median-window", type=int, default=5,
+        help="Median filter window size in samples (default: 5 = 2.5s at 2Hz)"
+    )
+    parser.add_argument(
+        "--no-velocity-filter", action="store_true",
+        help="Disable velocity constraint filter (enabled by default)"
+    )
+    parser.add_argument(
+        "--max-velocity", type=float, default=10.0,
+        help="Maximum elevation change rate in m/s (default: 10.0). Points with "
+             "faster changes are removed as birds/spray."
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
@@ -380,6 +413,15 @@ Examples:
         logger.info("Adaptive tolerance: expansion_rate=%.3f (tolerance grows by %.1fcm per meter from scanner)",
                     args.expansion_rate, args.expansion_rate * 100)
 
+    # Log physical filtering settings
+    if not args.no_physical_filter:
+        logger.info("Physical bounds filter: z_min=%.1fm, z_max=%.1fm", args.z_min, args.z_max)
+    if not args.no_median_filter:
+        logger.info("Median filter: window=%d samples (%.2fs at %.1fHz)",
+                    args.median_window, args.median_window * args.time_bin, 1.0/args.time_bin)
+    if not args.no_velocity_filter:
+        logger.info("Velocity filter: max_velocity=%.1f m/s", args.max_velocity)
+
     # Determine MOP number to use (explicit or auto-selected)
     mop_num = args.mop
     if args.auto_mop and mop_num is None:
@@ -477,6 +519,14 @@ Examples:
                 mop_table_path=args.mop_table,
                 auto_mop=args.auto_mop,
                 mop_method=args.mop_method,
+                # Physical outlier filtering
+                apply_physical_filter=not args.no_physical_filter,
+                z_max_physical=args.z_max,
+                z_min_physical=args.z_min,
+                apply_median_filter=not args.no_median_filter,
+                median_filter_window=args.median_window,
+                apply_velocity_filter=not args.no_velocity_filter,
+                max_velocity=args.max_velocity,
             )
         else:
             # Standard batch processing (loads all files per day at once)
@@ -499,6 +549,14 @@ Examples:
                 mop_table_path=args.mop_table,
                 auto_mop=args.auto_mop,
                 mop_method=args.mop_method,
+                # Physical outlier filtering
+                apply_physical_filter=not args.no_physical_filter,
+                z_max_physical=args.z_max,
+                z_min_physical=args.z_min,
+                apply_median_filter=not args.no_median_filter,
+                median_filter_window=args.median_window,
+                apply_velocity_filter=not args.no_velocity_filter,
+                max_velocity=args.max_velocity,
             )
 
         print(f"\nProcessing complete:")

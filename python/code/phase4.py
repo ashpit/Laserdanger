@@ -736,6 +736,14 @@ def process_l2(
     mop_table_path: Optional[Path] = None,
     auto_mop: bool = False,
     mop_method: str = "centroid",
+    # Physical outlier filtering parameters
+    apply_physical_filter: bool = True,
+    z_max_physical: float = 5.0,
+    z_min_physical: float = -0.5,
+    apply_median_filter: bool = True,
+    median_filter_window: int = 5,
+    apply_velocity_filter: bool = True,
+    max_velocity: float = 10.0,
 ) -> phase3.TimeResolvedDataset:
     """
     Orchestrate L2 processing: produces time-resolved Z(x,t) matrices for wave analysis.
@@ -816,6 +824,26 @@ def process_l2(
     mop_method : str
         Method for auto-MOP selection: "centroid" (default), "coverage", or
         "nearest_scanner". Only used when auto_mop=True.
+    apply_physical_filter : bool
+        Apply physical bounds filtering to remove non-water features like birds,
+        people, and spray (default True). Safe for IG waves.
+    z_max_physical : float
+        Maximum valid elevation in meters (default 5.0m). Points above this
+        are removed as outliers. Typical beach runup is 1-3m.
+    z_min_physical : float
+        Minimum valid elevation in meters (default -0.5m). Points below this
+        are removed as obvious errors.
+    apply_median_filter : bool
+        Apply median filter to smooth isolated spikes (default True). Safe for
+        IG waves because filter window (2.5s) << IG period (25-250s).
+    median_filter_window : int
+        Median filter window size in samples (default 5 = 2.5s at 2Hz).
+    apply_velocity_filter : bool
+        Apply velocity constraint to remove sudden jumps (default True). Safe
+        for IG waves because 10 m/s >> typical wave speeds (~3-5 m/s).
+    max_velocity : float
+        Maximum elevation change rate in m/s (default 10.0). Points with faster
+        changes are removed as birds/spray.
 
     Returns
     -------
@@ -1130,19 +1158,50 @@ def process_l2(
     if primary_grid is None:
         raise RuntimeError("No valid transect data produced")
 
-    # Apply 2D outlier detection
+    # Apply physical outlier filtering (birds, spray, people)
+    # This is applied BEFORE the 2D gradient-based outlier detection
+    Z_xt_raw = primary_grid.z_mean.T  # Shape (n_x, n_t)
+    dt = float(np.median(np.diff(primary_grid.t_edges)))
+
+    if apply_physical_filter or apply_median_filter or apply_velocity_filter:
+        logger.info("Applying physical outlier filtering (z_max=%.1fm, z_min=%.1fm)",
+                    z_max_physical, z_min_physical)
+
+        filter_result = phase2.filter_l2_outliers(
+            Z_xt_raw,
+            dt=dt,
+            z_min=z_min_physical,
+            z_max=z_max_physical,
+            apply_median=apply_median_filter,
+            median_window=median_filter_window,
+            apply_velocity=apply_velocity_filter,
+            max_velocity=max_velocity,
+        )
+
+        # Update the raw data with filtered values
+        Z_xt_raw = filter_result.Z_filtered
+
+        n_total_removed = filter_result.n_physical_removed + filter_result.n_velocity_removed
+        pct_removed = 100 * n_total_removed / Z_xt_raw.size
+        logger.info(
+            "Physical filtering removed %d points (%.2f%%): "
+            "%d physical bounds, %d velocity",
+            n_total_removed, pct_removed,
+            filter_result.n_physical_removed,
+            filter_result.n_velocity_removed,
+        )
+
+    # Apply 2D outlier detection (gradient/Laplacian based)
     outlier_mask = None
     Z_filtered = None
 
     if apply_outlier_detection:
-        logger.info("Applying 2D outlier detection")
-        Z_xt_raw = primary_grid.z_mean.T  # Shape (n_x, n_t)
-        dt = float(np.median(np.diff(primary_grid.t_edges)))
+        logger.info("Applying 2D outlier detection (gradient/Laplacian)")
 
         # Get outlier detection parameters
         params = outlier_params or {}
         outlier_result = utils.detect_outliers_conv2d(
-            Z_xt_raw,
+            Z_xt_raw,  # Use already physically-filtered data
             dt=dt,
             ig_length=params.get('ig_length', 60.0),
             gradient_threshold_std=params.get('gradient_threshold_std', 2.5),
@@ -1153,7 +1212,10 @@ def process_l2(
 
         n_outliers = outlier_mask.sum()
         total = outlier_mask.size
-        logger.info("Detected %d outliers (%.1f%%)", n_outliers, 100 * n_outliers / total)
+        logger.info("2D detection found %d additional outliers (%.1f%%)", n_outliers, 100 * n_outliers / total)
+    else:
+        # Use physically filtered data as final output
+        Z_filtered = Z_xt_raw
 
     # Extract intensity contours
     intensity_contours = None

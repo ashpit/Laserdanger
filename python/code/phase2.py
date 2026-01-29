@@ -791,3 +791,226 @@ def _fit_plane(neighbor_pts: ArrayLike) -> Tuple[float, float, float]:
         z_trim = neighbor_pts[keep, 2]
         coeffs, *_ = np.linalg.lstsq(A_trim, z_trim, rcond=None)
     return coeffs
+
+
+# =============================================================================
+# L2 Outlier Filtering Functions
+# =============================================================================
+
+def apply_physical_bounds_filter(
+    Z: ArrayLike,
+    z_min: float = -0.5,
+    z_max: float = 5.0,
+) -> Tuple[ArrayLike, int]:
+    """
+    Remove physically impossible elevations from a Z(x,t) timestack.
+
+    This filter is SAFE for infragravity (IG) waves because:
+    - IG wave runup rarely exceeds 2-3m elevation at typical beaches
+    - z_max=5m is conservative (removes birds, trees, buildings, spray)
+    - z_min=-0.5m removes obvious errors below ground level
+
+    Parameters
+    ----------
+    Z : array (n_x, n_t)
+        Elevation matrix (timestack)
+    z_min : float
+        Minimum valid elevation in meters (default: -0.5m)
+    z_max : float
+        Maximum valid elevation in meters (default: 5.0m)
+
+    Returns
+    -------
+    Z_filtered : array (n_x, n_t)
+        Filtered elevation matrix with outliers set to NaN
+    n_removed : int
+        Number of points removed
+    """
+    Z_filtered = Z.copy()
+    mask = (Z > z_max) | (Z < z_min)
+    n_removed = int(np.sum(mask & ~np.isnan(Z)))
+    Z_filtered[mask] = np.nan
+    return Z_filtered, n_removed
+
+
+def apply_temporal_median_filter(
+    Z: ArrayLike,
+    window_size: int = 5,
+) -> ArrayLike:
+    """
+    Apply median filter along the time axis of a Z(x,t) timestack.
+
+    This filter is SAFE for infragravity (IG) waves because:
+    - At 2Hz sampling, window_size=5 spans 2.5 seconds
+    - IG waves have periods of 25-250 seconds (10-100x longer than filter window)
+    - Only isolated spikes are smoothed; real wave signals are preserved
+
+    NOTE: This should be applied BEFORE physical bounds filtering,
+    as scipy's median_filter doesn't handle NaN values properly.
+
+    Parameters
+    ----------
+    Z : array (n_x, n_t)
+        Elevation matrix (timestack)
+    window_size : int
+        Median filter window size in samples (default: 5)
+
+    Returns
+    -------
+    Z_filtered : array (n_x, n_t)
+        Filtered elevation matrix
+    """
+    from scipy.ndimage import median_filter
+
+    # Ensure odd window size
+    if window_size % 2 == 0:
+        window_size += 1
+
+    # Store original NaN locations
+    nan_mask = np.isnan(Z)
+
+    # Replace NaN with large value temporarily so median filter works
+    # The physical bounds filter will remove these later
+    Z_temp = Z.copy()
+    Z_temp[nan_mask] = 9999.0
+
+    # Apply median filter along time axis (axis=1)
+    # Use (1, window_size) kernel to filter only along time, not space
+    Z_filtered = median_filter(Z_temp, size=(1, window_size), mode='nearest')
+
+    # Restore NaN locations
+    Z_filtered[nan_mask] = np.nan
+
+    return Z_filtered
+
+
+def apply_velocity_filter(
+    Z: ArrayLike,
+    dt: float,
+    max_velocity: float = 10.0,
+) -> Tuple[ArrayLike, int]:
+    """
+    Remove points with unrealistic temporal jumps in elevation.
+
+    This filter removes elevation spikes that change faster than physically
+    possible for water waves. It's SAFE for IG waves because:
+    - max_velocity=10 m/s is very generous
+    - IG waves move at ~sqrt(g*h) ~ 3-5 m/s in shallow water
+    - Only removes instantaneous jumps (likely birds/spray)
+
+    Parameters
+    ----------
+    Z : array (n_x, n_t)
+        Elevation matrix (timestack)
+    dt : float
+        Time step in seconds
+    max_velocity : float
+        Maximum allowed elevation change rate in m/s (default: 10.0)
+
+    Returns
+    -------
+    Z_filtered : array (n_x, n_t)
+        Filtered elevation matrix with velocity outliers set to NaN
+    n_removed : int
+        Number of points removed
+    """
+    Z_filtered = Z.copy()
+    max_jump = max_velocity * dt
+    n_removed = 0
+
+    # Check temporal gradients for each spatial bin
+    for i in range(Z.shape[0]):
+        row = Z_filtered[i, :]
+        for j in range(1, len(row)):
+            if not np.isnan(row[j]) and not np.isnan(row[j-1]):
+                if abs(row[j] - row[j-1]) > max_jump:
+                    Z_filtered[i, j] = np.nan
+                    n_removed += 1
+
+    return Z_filtered, n_removed
+
+
+@dataclass
+class L2OutlierFilterResult:
+    """Result from L2 outlier filtering."""
+    Z_filtered: ArrayLike
+    n_physical_removed: int
+    n_velocity_removed: int
+    z_min_used: float
+    z_max_used: float
+    max_velocity_used: float
+
+
+def filter_l2_outliers(
+    Z: ArrayLike,
+    dt: float,
+    z_min: float = -0.5,
+    z_max: float = 5.0,
+    apply_median: bool = True,
+    median_window: int = 5,
+    apply_velocity: bool = True,
+    max_velocity: float = 10.0,
+) -> L2OutlierFilterResult:
+    """
+    Apply complete outlier filtering pipeline to L2 timestack data.
+
+    This is the recommended filtering approach for L2 processing:
+    1. Median filter: Smooth isolated spikes FIRST (optional)
+    2. Physical bounds filter: Remove Z > z_max or Z < z_min
+    3. Velocity filter: Remove unrealistic temporal jumps (optional)
+
+    The order is important: median filter first because it doesn't handle
+    NaN values well. Physical bounds filter is applied after, then velocity.
+
+    This approach is SAFE for infragravity (IG) waves because:
+    - Median filter window (2.5s) is much shorter than IG period (25-250s)
+    - Physical bounds (z_max=5m) only removes non-water features
+    - Velocity constraint (10 m/s) is generous for real wave motion
+
+    Parameters
+    ----------
+    Z : array (n_x, n_t)
+        Elevation matrix (timestack)
+    dt : float
+        Time step in seconds
+    z_min : float
+        Minimum valid elevation (default: -0.5m)
+    z_max : float
+        Maximum valid elevation (default: 5.0m)
+    apply_median : bool
+        Apply median filter (default: True)
+    median_window : int
+        Median filter window size in samples (default: 5)
+    apply_velocity : bool
+        Apply velocity constraint filter (default: True)
+    max_velocity : float
+        Maximum elevation change rate in m/s (default: 10.0)
+
+    Returns
+    -------
+    L2OutlierFilterResult
+        Filtered data with diagnostics
+    """
+    Z_filtered = Z.copy()
+
+    # Stage 1: Median filter FIRST (smooths spikes before bounds check)
+    # This reduces extreme outliers so physical bounds has less to remove
+    if apply_median:
+        Z_filtered = apply_temporal_median_filter(Z_filtered, median_window)
+
+    # Stage 2: Physical bounds (removes any values still outside range)
+    Z_filtered, n_physical = apply_physical_bounds_filter(Z_filtered, z_min, z_max)
+
+    # Stage 3: Velocity filter (optional)
+    n_velocity = 0
+    if apply_velocity:
+        Z_filtered, n_velocity = apply_velocity_filter(Z_filtered, dt, max_velocity)
+
+    return L2OutlierFilterResult(
+        Z_filtered=Z_filtered,
+        n_physical_removed=n_physical,
+        n_velocity_removed=n_velocity,
+        z_min_used=z_min,
+        z_max_used=z_max,
+        max_velocity_used=max_velocity,
+    )
